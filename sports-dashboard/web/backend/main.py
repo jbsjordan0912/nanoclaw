@@ -157,7 +157,13 @@ def simulate(req: SimRequest):
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "wp_table_loaded": len(sim._WP_LOOKUP) > 0,
+        "wp_table_size": len(sim._WP_LOOKUP),
+        "batter_cache_loaded": len(sim._BATTER_CACHE) > 0,
+        "batter_cache_size": len(sim._BATTER_CACHE),
+    }
 
 
 # ---------------------------------------------------------------------------
