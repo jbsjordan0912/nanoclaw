@@ -144,19 +144,77 @@ function ResultBanner({ result }) {
   )
 }
 
+// ── Strike Zone SVG ───────────────────────────────────────────────────────────
+const PITCH_DOT_COLORS = {
+  'Called Strike':   '#ef4444',
+  'Swinging Strike': '#f97316',
+  'Ball':            '#22c55e',
+  'Foul':            '#f59e0b',
+  'Hit Into Play':   '#3b82f6',
+}
+
+function StrikeZone({ pitches, shownCount }) {
+  const W = 200, H = 230
+  const cx = W / 2
+  // plate_x in feet from center, plate_z feet from ground
+  const toX = (px) => cx + (px ?? 0) * 55
+  const toY = (pz) => H - 20 - ((pz ?? 2.5) - 0.5) * 50
+  // Average strike zone: ±0.708 ft wide, 1.5–3.5 ft tall
+  const zx = toX(-0.708), zy = toY(3.5)
+  const zw = toX(0.708) - zx, zh = toY(1.5) - zy
+
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', maxWidth: 200, display: 'block', margin: '0 auto' }}>
+      <rect width={W} height={H} fill="#0f172a" rx={8} />
+      {/* Home plate */}
+      <polygon
+        points={`${cx-14},${H-6} ${cx+14},${H-6} ${cx+14},${H-18} ${cx},${H-8} ${cx-14},${H-18}`}
+        fill="none" stroke="#334155" strokeWidth={1.5}
+      />
+      {/* Zone grid */}
+      {[1/3, 2/3].map((t, i) => (
+        <g key={i}>
+          <line x1={zx+zw*t} y1={zy} x2={zx+zw*t} y2={zy+zh} stroke="#1e293b" strokeWidth={1} />
+          <line x1={zx} y1={zy+zh*t} x2={zx+zw} y2={zy+zh*t} stroke="#1e293b" strokeWidth={1} />
+        </g>
+      ))}
+      {/* Strike zone box */}
+      <rect x={zx} y={zy} width={zw} height={zh} fill="none" stroke="#475569" strokeWidth={1.5} rx={2} />
+      {/* Pitch dots */}
+      {pitches.slice(0, shownCount).map((p, i) => {
+        const x = toX(p.plate_x), y = toY(p.plate_z)
+        const color = PITCH_DOT_COLORS[p.outcome] ?? '#94a3b8'
+        return (
+          <g key={i} style={{ animation: 'fadeIn 0.2s ease' }}>
+            <circle cx={x} cy={y} r={10} fill={color} fillOpacity={0.2} />
+            <circle cx={x} cy={y} r={7} fill={color} />
+            <text x={x} y={y+1} textAnchor="middle" dominantBaseline="middle"
+              fontSize={8} fontWeight="bold" fill="#fff">{i + 1}</text>
+          </g>
+        )
+      })}
+    </svg>
+  )
+}
+
 // ── At-Bat Simulator tab ──────────────────────────────────────────────────────
 function AtBatTab() {
   const [batter, setBatter] = useState(null)
   const [pitcher, setPitcher] = useState(null)
   const [loading, setLoading] = useState(false)
-  const [result, setResult] = useState(null)
+  const [simData, setSimData] = useState(null)   // full result from API
+  const [shownCount, setShownCount] = useState(0) // pitches revealed so far
   const [error, setError] = useState(null)
   const [history, setHistory] = useState([])
+  const revealTimer = useRef(null)
   const canSim = batter && pitcher && !loading
+  const pitches = simData?.pitches ?? []
+  const isDone = simData && shownCount >= pitches.length
 
   const simulate = async () => {
     if (!canSim) return
-    setLoading(true); setResult(null); setError(null)
+    clearTimeout(revealTimer.current)
+    setLoading(true); setSimData(null); setShownCount(0); setError(null)
     try {
       const res = await fetch(`${API}/api/simulate`, {
         method: 'POST',
@@ -165,11 +223,31 @@ function AtBatTab() {
       })
       if (!res.ok) throw new Error(`Server error ${res.status}`)
       const data = await res.json()
-      setResult(data)
+      setSimData(data)
       setHistory(h => [data, ...h].slice(0, 10))
     } catch (e) { setError(e.message) }
     finally { setLoading(false) }
   }
+
+  // Auto-advance one pitch every 1.2s
+  useEffect(() => {
+    if (!simData || shownCount >= pitches.length) return
+    revealTimer.current = setTimeout(() => setShownCount(c => c + 1), 1200)
+    return () => clearTimeout(revealTimer.current)
+  }, [simData, shownCount, pitches.length])
+
+  const skipToEnd = () => {
+    clearTimeout(revealTimer.current)
+    setShownCount(pitches.length)
+  }
+
+  // Live count from revealed pitches
+  const liveCount = pitches.slice(0, shownCount).reduce((acc, p) => {
+    const o = p.outcome
+    if (o === 'Ball') return { ...acc, b: Math.min(acc.b + 1, 3) }
+    if (o === 'Called Strike' || o === 'Swinging Strike') return { ...acc, s: Math.min(acc.s + 1, 2) }
+    return acc
+  }, { b: 0, s: 0 })
 
   return (
     <div>
@@ -186,29 +264,63 @@ function AtBatTab() {
         width: '100%', padding: '14px 0', borderRadius: 10, border: 'none',
         background: canSim ? '#2563eb' : '#1e293b',
         color: canSim ? '#fff' : '#475569', fontSize: 16, fontWeight: 700,
-        cursor: canSim ? 'pointer' : 'not-allowed', transition: 'background 0.2s', marginBottom: 24,
+        cursor: canSim ? 'pointer' : 'not-allowed', transition: 'background 0.2s', marginBottom: 20,
       }}>
         {loading ? '⏳ Simulating...' : '▶ Simulate At-Bat'}
       </button>
       {error && <div style={{ color: '#ef4444', fontSize: 14, textAlign: 'center', marginBottom: 16 }}>{error}</div>}
-      {result && (
+
+      {simData && (
         <div style={{ marginBottom: 24 }}>
-          <ResultBanner result={result} />
-          {result.pitches?.length > 0 && (
+          {/* Live count display */}
+          {!isDone && (
+            <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 16, marginBottom: 14 }}>
+              <span style={{ fontSize: 28, fontWeight: 800, color: '#22c55e', fontVariantNumeric: 'tabular-nums' }}>{liveCount.b}</span>
+              <span style={{ fontSize: 20, color: '#334155' }}>–</span>
+              <span style={{ fontSize: 28, fontWeight: 800, color: '#ef4444', fontVariantNumeric: 'tabular-nums' }}>{liveCount.s}</span>
+              <span style={{ fontSize: 12, color: '#475569', marginLeft: 4 }}>B – S</span>
+            </div>
+          )}
+
+          {/* Strike zone */}
+          {pitches.some(p => p.plate_x != null) && (
+            <div style={{ marginBottom: 16 }}>
+              <StrikeZone pitches={pitches} shownCount={shownCount} />
+            </div>
+          )}
+
+          {/* Skip button while revealing */}
+          {!isDone && (
+            <button onClick={skipToEnd} style={{
+              width: '100%', padding: '8px 0', borderRadius: 8, border: '1px solid #334155',
+              background: 'transparent', color: '#64748b', fontSize: 13,
+              cursor: 'pointer', marginBottom: 14,
+            }}>⏩ Skip to result</button>
+          )}
+
+          {/* Result banner — only after all pitches shown */}
+          {isDone && (
+            <>
+              <ResultBanner result={simData} />
+              <button onClick={simulate} style={{
+                width: '100%', padding: '12px 0', borderRadius: 10, border: '1px solid #334155',
+                background: 'transparent', color: '#94a3b8', fontSize: 14, fontWeight: 600,
+                cursor: 'pointer', marginTop: 16,
+              }}>🔄 Simulate Again</button>
+            </>
+          )}
+
+          {/* Pitch log */}
+          {shownCount > 0 && (
             <div style={{ marginTop: 16 }}>
               <div style={{ fontSize: 11, color: '#475569', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 8 }}>
                 Pitch Sequence
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                {result.pitches.map((p, i) => <PitchCard key={i} pitch={p} delay={i * 0.08} />)}
+                {pitches.slice(0, shownCount).map((p, i) => <PitchCard key={i} pitch={p} delay={0} />)}
               </div>
             </div>
           )}
-          <button onClick={simulate} style={{
-            width: '100%', padding: '12px 0', borderRadius: 10, border: '1px solid #334155',
-            background: 'transparent', color: '#94a3b8', fontSize: 14, fontWeight: 600,
-            cursor: 'pointer', marginTop: 16,
-          }}>🔄 Simulate Again</button>
         </div>
       )}
       {history.length > 1 && (

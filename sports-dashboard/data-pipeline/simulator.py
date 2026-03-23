@@ -635,7 +635,13 @@ def simulate_at_bat(
             loc = _loc_label(px, pz)
             parts = [p for p in [ptype, spd_str, loc] if p]
             pitch_detail = f"  [{', '.join(parts)}]" if parts else ""
-            pitch_data.update({"pitch_type": ptype, "velocity": round(spd, 1) if spd else None, "location": loc})
+            pitch_data.update({
+                "pitch_type": ptype,
+                "velocity": round(spd, 1) if spd else None,
+                "location": loc,
+                "plate_x": round(px, 3) if px is not None else None,
+                "plate_z": round(pz, 3) if pz is not None else None,
+            })
         pitch_log.append(pitch_data)
         if verbose:
             print(f"  Pitch {pitch_num} | Count: {b}-{s}{pitch_detail} → {outcome.replace('_', ' ').title()}")
