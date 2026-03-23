@@ -213,6 +213,110 @@ def win_probability(req: WPRequest):
 
 
 # ---------------------------------------------------------------------------
+# MLB live game data
+# ---------------------------------------------------------------------------
+
+MLB_API = "https://statsapi.mlb.com/api/v1"
+
+@app.get("/api/games/today")
+async def games_today():
+    """Return today's MLB games with status, teams, score."""
+    import httpx
+    from datetime import datetime, timezone
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        r = await client.get(f"{MLB_API}/schedule", params={
+            "sportId": 1, "date": today, "hydrate": "linescore"
+        })
+    games = []
+    for g in r.json().get("dates", [{}])[0].get("games", []):
+        ls = g.get("linescore", {})
+        status = g["status"]["abstractGameState"]  # Live / Final / Preview
+        games.append({
+            "game_pk":    g["gamePk"],
+            "status":     status,
+            "away_team":  g["teams"]["away"]["team"]["name"],
+            "home_team":  g["teams"]["home"]["team"]["name"],
+            "away_id":    g["teams"]["away"]["team"]["id"],
+            "home_id":    g["teams"]["home"]["team"]["id"],
+            "away_score": g["teams"]["away"].get("score"),
+            "home_score": g["teams"]["home"].get("score"),
+            "inning":     ls.get("currentInning"),
+            "inning_half": ls.get("inningHalf"),
+            "game_time":  g.get("gameDate"),
+        })
+    return games
+
+
+@app.get("/api/games/{game_pk}/state")
+async def game_state(game_pk: int):
+    """Return full live game state for a game — for auto-mode polling."""
+    import httpx
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        r = await client.get(f"https://statsapi.mlb.com/api/v1.1/game/{game_pk}/feed/live")
+    if r.status_code != 200:
+        raise HTTPException(404, "Game not found")
+
+    data    = r.json()
+    ls      = data["liveData"]["linescore"]
+    gd      = data["gameData"]
+    bx      = data["liveData"]["boxscore"]
+
+    inning_half = ls.get("inningHalf", "Top")
+    topbot      = "Bot" if inning_half == "Bottom" else "Top"
+    is_top      = topbot == "Top"
+
+    away_runs = ls["teams"]["away"]["runs"]
+    home_runs = ls["teams"]["home"]["runs"]
+    bat_score = away_runs if is_top else home_runs
+    fld_score = home_runs if is_top else away_runs
+
+    offense = ls.get("offense", {})
+
+    # Current pitcher (defense side)
+    defense  = ls.get("defense", {})
+    pitcher  = defense.get("pitcher", {})
+    pitcher_id   = pitcher.get("id")
+    pitcher_name = pitcher.get("fullName")
+
+    # Build lineups from boxscore
+    def lineup(side):
+        players = bx["teams"][side]["players"]
+        batters = [(v["battingOrder"], v["person"]["id"], v["person"]["fullName"])
+                   for v in players.values() if v.get("battingOrder")]
+        return [{"id": bid, "name": name}
+                for _, bid, name in sorted(batters, key=lambda x: x[0])]
+
+    batting_side  = "away" if is_top else "home"
+    fielding_side = "home" if is_top else "away"
+
+    return {
+        "game_pk":    game_pk,
+        "status":     data["gameData"]["status"]["abstractGameState"],
+        "inning":     ls.get("currentInning", 1),
+        "topbot":     topbot,
+        "outs":       ls.get("outs", 0),
+        "on_1b":      bool(offense.get("first")),
+        "on_2b":      bool(offense.get("second")),
+        "on_3b":      bool(offense.get("third")),
+        "bat_score":  bat_score,
+        "fld_score":  fld_score,
+        "away_team":  gd["teams"]["away"]["name"],
+        "home_team":  gd["teams"]["home"]["name"],
+        "batting_team":  gd["teams"][batting_side]["name"],
+        "fielding_team": gd["teams"][fielding_side]["name"],
+        "pitcher_id":   pitcher_id,
+        "pitcher_name": pitcher_name,
+        "batting_lineup":  lineup(batting_side),
+        "fielding_lineup": lineup(fielding_side),
+        "batter": {
+            "id":   offense.get("batter", {}).get("id"),
+            "name": offense.get("batter", {}).get("fullName"),
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
 # Kalshi price fetch
 # ---------------------------------------------------------------------------
 

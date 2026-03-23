@@ -231,6 +231,76 @@ function AtBatTab() {
   )
 }
 
+// ── Game picker ───────────────────────────────────────────────────────────────
+function GamePicker({ selectedPk, onSelect }) {
+  const [games, setGames] = useState([])
+  const [open, setOpen] = useState(false)
+
+  useEffect(() => {
+    fetch(`${API}/api/games/today`)
+      .then(r => r.json())
+      .then(data => setGames(data.filter(g => g.status !== 'Postponed')))
+      .catch(() => {})
+  }, [])
+
+  const selected = games.find(g => g.game_pk === selectedPk)
+
+  const statusBadge = (g) => {
+    if (g.status === 'Live') return { label: `${g.inning_half?.slice(0,3) || ''} ${g.inning || ''}`, color: '#22c55e' }
+    return { label: 'Preview', color: '#64748b' }
+  }
+
+  return (
+    <div style={{ position: 'relative', marginBottom: 14 }}>
+      <label style={labelStyle}>Select Game</label>
+      <button onClick={() => setOpen(o => !o)} style={{
+        width: '100%', padding: '10px 14px', borderRadius: 8,
+        background: '#0f172a', border: '1px solid #334155',
+        color: selected ? '#f1f5f9' : '#475569', fontSize: 14, fontWeight: 600,
+        cursor: 'pointer', textAlign: 'left', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+      }}>
+        <span>
+          {selected
+            ? `${selected.away_team} @ ${selected.home_team}`
+            : games.length ? 'Choose a game...' : 'Loading games...'}
+        </span>
+        {selected && (() => { const b = statusBadge(selected); return <span style={{ fontSize: 12, color: b.color, fontWeight: 700 }}>{b.label}</span> })()}
+      </button>
+      {open && games.length > 0 && (
+        <div style={{
+          position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 50, marginTop: 4,
+          background: '#1e293b', border: '1px solid #334155', borderRadius: 8,
+          boxShadow: '0 8px 24px rgba(0,0,0,0.5)', overflow: 'hidden',
+        }}>
+          {games.map(g => {
+            const b = statusBadge(g)
+            return (
+              <div key={g.game_pk} onClick={() => { onSelect(g.game_pk); setOpen(false) }}
+                style={{ padding: '11px 14px', cursor: 'pointer', borderBottom: '1px solid #0f172a',
+                  display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                  background: g.game_pk === selectedPk ? '#1e3a5f' : 'transparent' }}
+                onMouseEnter={e => e.currentTarget.style.background = '#334155'}
+                onMouseLeave={e => e.currentTarget.style.background = g.game_pk === selectedPk ? '#1e3a5f' : 'transparent'}>
+                <div>
+                  <div style={{ fontSize: 14, fontWeight: 600, color: '#f1f5f9' }}>
+                    {g.away_team} @ {g.home_team}
+                  </div>
+                  {g.status === 'Live' && (
+                    <div style={{ fontSize: 12, color: '#64748b', marginTop: 2 }}>
+                      {g.away_score} – {g.home_score}
+                    </div>
+                  )}
+                </div>
+                <span style={{ fontSize: 12, fontWeight: 700, color: b.color }}>{b.label}</span>
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── WP / Kalshi Dashboard tab ─────────────────────────────────────────────────
 function BaseToggle({ value, options, onChange }) {
   return (
@@ -287,24 +357,95 @@ function WPBar({ wp }) {
 }
 
 function WPDashboard() {
+  const [mode, setMode] = useState('manual')          // 'auto' | 'manual'
+  const [selectedGame, setSelectedGame] = useState(null)
+  const [gameInfo, setGameInfo] = useState(null)       // full game state from MLB API
+  const [liveStatus, setLiveStatus] = useState(null)   // e.g. "Synced 0s ago"
   const [state, setState] = useState({
     inning: 7, topbot: 'Bot', outs: 1,
     on_1b: false, on_2b: false, on_3b: false,
-    bat_score: 0, fld_score: 0, season: 2024,
+    bat_score: 0, fld_score: 0, season: 2025,
   })
+  const [lineupIds, setLineupIds] = useState(null)
+  const [pitcherId, setPitcherId] = useState(null)
   const [kalshiInput, setKalshiInput] = useState('')
   const [wpData, setWpData] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
+  const pollRef = useRef(null)
+  const lastSyncRef = useRef(null)
 
   const toggleBase = (base) => setState(s => ({ ...s, [base]: !s[base] }))
   const update = (key, val) => setState(s => ({ ...s, [key]: val }))
+
+  // Fetch live game state from MLB API and sync into local state
+  const syncGameState = useCallback(async (gamePk) => {
+    try {
+      const res = await fetch(`${API}/api/games/${gamePk}/state`)
+      if (!res.ok) return
+      const g = await res.json()
+      setGameInfo(g)
+
+      // Stop polling if game is over
+      if (g.status === 'Final') {
+        if (pollRef.current) clearInterval(pollRef.current)
+        setLiveStatus('Final — game over')
+        return
+      }
+
+      // Game not started yet (Preview)
+      if (g.status === 'Preview') {
+        setLiveStatus('Not started yet')
+        return
+      }
+
+      setState({
+        inning: g.inning || 1,
+        topbot: g.topbot || 'Top',
+        outs: g.outs || 0,
+        on_1b: g.on_1b || false,
+        on_2b: g.on_2b || false,
+        on_3b: g.on_3b || false,
+        bat_score: g.bat_score || 0,
+        fld_score: g.fld_score || 0,
+        season: 2025,
+      })
+      if (g.batting_lineup?.length) setLineupIds(g.batting_lineup.map(p => p.id))
+      if (g.pitcher_id) setPitcherId(g.pitcher_id)
+      lastSyncRef.current = Date.now()
+      setLiveStatus('Just synced')
+    } catch {}
+  }, [])
+
+  // Start/stop polling when mode or game changes
+  useEffect(() => {
+    if (pollRef.current) clearInterval(pollRef.current)
+    if (mode === 'auto' && selectedGame) {
+      syncGameState(selectedGame)
+      pollRef.current = setInterval(() => syncGameState(selectedGame), 15000)
+    }
+    return () => { if (pollRef.current) clearInterval(pollRef.current) }
+  }, [mode, selectedGame, syncGameState])
+
+  // Update "synced Xs ago" every 5s
+  useEffect(() => {
+    if (mode !== 'auto') return
+    const t = setInterval(() => {
+      if (lastSyncRef.current) {
+        const s = Math.round((Date.now() - lastSyncRef.current) / 1000)
+        setLiveStatus(`${s}s ago`)
+      }
+    }, 5000)
+    return () => clearInterval(t)
+  }, [mode])
 
   const calculate = async () => {
     setLoading(true); setError(null)
     try {
       const body = {
         ...state,
+        batting_lineup: lineupIds || null,
+        fielding_pitcher: pitcherId || null,
         kalshi_price: kalshiInput ? parseFloat(kalshiInput) / 100 : null,
       }
       const res = await fetch(`${API}/api/wp`, {
@@ -327,8 +468,42 @@ function WPDashboard() {
 
   return (
     <div>
+      {/* Auto / Manual mode toggle */}
+      <div style={{ display: 'flex', gap: 10, marginBottom: 16, alignItems: 'center' }}>
+        <div style={{ flex: 1 }}>
+          <BaseToggle
+            value={mode}
+            options={[{ value: 'auto', label: '📺 Auto' }, { value: 'manual', label: '✏️ Manual' }]}
+            onChange={v => { setMode(v); if (v === 'manual') setLiveStatus(null) }}
+          />
+        </div>
+        {mode === 'auto' && liveStatus && (
+          <div style={{ fontSize: 11, color: '#22c55e', minWidth: 80, textAlign: 'right' }}>
+            🟢 {liveStatus}
+          </div>
+        )}
+      </div>
+
+      {/* Game picker — auto mode only */}
+      {mode === 'auto' && (
+        <div style={{ background: '#1e293b', borderRadius: 12, padding: 16, marginBottom: 16 }}>
+          <GamePicker selectedPk={selectedGame} onSelect={setSelectedGame} />
+          {gameInfo && (
+            <div style={{ fontSize: 13, color: '#94a3b8', marginTop: 4 }}>
+              <span style={{ color: '#f1f5f9', fontWeight: 700 }}>{gameInfo.batting_team}</span>
+              <span style={{ color: '#475569' }}> batting · </span>
+              <span style={{ color: '#f1f5f9', fontWeight: 600 }}>{gameInfo.pitcher_name || '—'}</span>
+              <span style={{ color: '#475569' }}> pitching</span>
+            </div>
+          )}
+          {mode === 'auto' && !selectedGame && (
+            <div style={{ fontSize: 13, color: '#475569', marginTop: 4 }}>Select a live game above to start auto-tracking</div>
+          )}
+        </div>
+      )}
+
       {/* Game state inputs */}
-      <div style={{ background: '#1e293b', borderRadius: 12, padding: 16, marginBottom: 16 }}>
+      <div style={{ background: '#1e293b', borderRadius: 12, padding: 16, marginBottom: 16, opacity: mode === 'auto' ? 0.7 : 1 }}>
 
         {/* Inning + Top/Bot */}
         <div style={{ display: 'flex', gap: 12, marginBottom: 14, alignItems: 'flex-end' }}>
@@ -349,6 +524,12 @@ function WPDashboard() {
             <BaseToggle value={state.outs} options={[{ value: 0, label: '0' }, { value: 1, label: '1' }, { value: 2, label: '2' }]} onChange={v => update('outs', v)} />
           </div>
         </div>
+
+        {mode === 'auto' && (
+          <div style={{ fontSize: 11, color: '#475569', marginBottom: 10, textAlign: 'center' }}>
+            Auto mode — tap to override any value
+          </div>
+        )}
 
         {/* Score + Bases */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
