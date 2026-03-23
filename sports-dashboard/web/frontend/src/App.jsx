@@ -180,8 +180,8 @@ function StrikeZone({ pitches, shownCount }) {
       ))}
       {/* Strike zone box */}
       <rect x={zx} y={zy} width={zw} height={zh} fill="none" stroke="#475569" strokeWidth={1.5} rx={2} />
-      {/* Pitch dots */}
-      {pitches.slice(0, shownCount).map((p, i) => {
+      {/* Pitch dots — skip if no location data */}
+      {pitches.slice(0, shownCount).filter(p => p.plate_x != null).map((p, i) => {
         const x = toX(p.plate_x), y = toY(p.plate_z)
         const color = PITCH_DOT_COLORS[p.outcome] ?? '#94a3b8'
         return (
@@ -282,8 +282,8 @@ function AtBatTab() {
             </div>
           )}
 
-          {/* Strike zone */}
-          {pitches.some(p => p.plate_x != null) && (
+          {/* Strike zone — always show once sim starts; dots only appear when plate_x is present */}
+          {pitches.length > 0 && (
             <div style={{ marginBottom: 16 }}>
               <StrikeZone pitches={pitches} shownCount={shownCount} />
             </div>
