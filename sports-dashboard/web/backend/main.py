@@ -157,13 +157,16 @@ def simulate(req: SimRequest):
 
 @app.get("/api/health")
 def health():
-    batter_cache = sim._BATTER_CACHE or {}
-    return {
-        "status": "ok",
-        "wp_table_loaded": len(sim._WP_LOOKUP) > 0,
-        "wp_table_size": len(sim._WP_LOOKUP),
-        "batter_cache_size": len(batter_cache),
-    }
+    try:
+        wp_size = len(sim._WP_LOOKUP)
+    except Exception:
+        wp_size = -1
+    try:
+        bc = sim._BATTER_CACHE
+        bc_size = len(bc) if bc else 0
+    except Exception:
+        bc_size = -1
+    return {"status": "ok", "wp_table_size": wp_size, "batter_cache_size": bc_size}
 
 
 # ---------------------------------------------------------------------------
