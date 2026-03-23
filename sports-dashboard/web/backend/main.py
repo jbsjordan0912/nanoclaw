@@ -307,6 +307,8 @@ async def game_state(game_pk: int):
         "fielding_team": gd["teams"][fielding_side]["name"],
         "pitcher_id":   pitcher_id,
         "pitcher_name": pitcher_name,
+        "balls":        ls.get("balls", 0),
+        "strikes":      ls.get("strikes", 0),
         "batting_lineup":  lineup(batting_side),
         "fielding_lineup": lineup(fielding_side),
         "batter": {

@@ -363,6 +363,7 @@ function WPDashboard() {
   const [liveStatus, setLiveStatus] = useState(null)   // e.g. "Synced 0s ago"
   const [state, setState] = useState({
     inning: 7, topbot: 'Bot', outs: 1,
+    balls: 0, strikes: 0,
     on_1b: false, on_2b: false, on_3b: false,
     away_score: 0, home_score: 0, season: 2025,
   })
@@ -403,6 +404,8 @@ function WPDashboard() {
         inning: g.inning || 1,
         topbot: g.topbot || 'Top',
         outs: g.outs || 0,
+        balls: g.balls || 0,
+        strikes: g.strikes || 0,
         on_1b: g.on_1b || false,
         on_2b: g.on_2b || false,
         on_3b: g.on_3b || false,
@@ -508,23 +511,51 @@ function WPDashboard() {
       {/* Game state inputs */}
       <div style={{ background: '#1e293b', borderRadius: 12, padding: 16, marginBottom: 16, opacity: mode === 'auto' ? 0.7 : 1 }}>
 
-        {/* Inning + Top/Bot */}
-        <div style={{ display: 'flex', gap: 12, marginBottom: 14, alignItems: 'flex-end' }}>
-          <div style={{ flex: 1 }}>
+        {/* Inning + Top/Bot + Outs */}
+        <div style={{ display: 'flex', gap: 10, marginBottom: 12, alignItems: 'flex-end' }}>
+          <div>
             <label style={labelStyle}>Inning</label>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
               <button onClick={() => update('inning', Math.max(1, state.inning - 1))} style={nudgeBtn}>−</button>
-              <span style={{ fontSize: 22, fontWeight: 800, color: '#f1f5f9', minWidth: 28, textAlign: 'center' }}>{state.inning}</span>
+              <span style={{ fontSize: 18, fontWeight: 800, color: '#f1f5f9', minWidth: 22, textAlign: 'center' }}>{state.inning}</span>
               <button onClick={() => update('inning', Math.min(12, state.inning + 1))} style={nudgeBtn}>+</button>
             </div>
           </div>
           <div style={{ flex: 1 }}>
             <label style={labelStyle}>Half</label>
-            <BaseToggle value={state.topbot} options={[{ value: 'Top', label: '▲ Top' }, { value: 'Bot', label: '▼ Bot' }]} onChange={v => update('topbot', v)} />
+            <BaseToggle value={state.topbot} options={[{ value: 'Top', label: '▲' }, { value: 'Bot', label: '▼' }]} onChange={v => update('topbot', v)} />
           </div>
           <div style={{ flex: 1 }}>
             <label style={labelStyle}>Outs</label>
             <BaseToggle value={state.outs} options={[{ value: 0, label: '0' }, { value: 1, label: '1' }, { value: 2, label: '2' }]} onChange={v => update('outs', v)} />
+          </div>
+        </div>
+
+        {/* Balls + Strikes */}
+        <div style={{ display: 'flex', gap: 10, marginBottom: 12 }}>
+          <div style={{ flex: 1 }}>
+            <label style={labelStyle}>Balls</label>
+            <div style={{ display: 'flex', gap: 6 }}>
+              {[0,1,2,3].map(b => (
+                <button key={b} onClick={() => update('balls', b)} style={{
+                  flex: 1, padding: '7px 0', borderRadius: 6, border: 'none', fontSize: 13, fontWeight: 700,
+                  background: state.balls === b ? '#22c55e' : '#0f172a',
+                  color: state.balls === b ? '#fff' : '#475569', cursor: 'pointer',
+                }}>{b}</button>
+              ))}
+            </div>
+          </div>
+          <div style={{ flex: 1 }}>
+            <label style={labelStyle}>Strikes</label>
+            <div style={{ display: 'flex', gap: 6 }}>
+              {[0,1,2].map(s => (
+                <button key={s} onClick={() => update('strikes', s)} style={{
+                  flex: 1, padding: '7px 0', borderRadius: 6, border: 'none', fontSize: 13, fontWeight: 700,
+                  background: state.strikes === s ? '#ef4444' : '#0f172a',
+                  color: state.strikes === s ? '#fff' : '#475569', cursor: 'pointer',
+                }}>{s}</button>
+              ))}
+            </div>
           </div>
         </div>
 
