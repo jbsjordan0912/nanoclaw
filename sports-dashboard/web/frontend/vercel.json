@@ -1,5 +1,5 @@
 {
   "rewrites": [
-    { "source": "/api/:path*", "destination": "https://your-render-app.onrender.com/api/:path*" }
+    { "source": "/api/:path*", "destination": "https://mlb-simulator-api.onrender.com/api/:path*" }
   ]
 }
