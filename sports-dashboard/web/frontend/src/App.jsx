@@ -364,7 +364,7 @@ function WPDashboard() {
   const [state, setState] = useState({
     inning: 7, topbot: 'Bot', outs: 1,
     on_1b: false, on_2b: false, on_3b: false,
-    bat_score: 0, fld_score: 0, season: 2025,
+    away_score: 0, home_score: 0, season: 2025,
   })
   const [lineupIds, setLineupIds] = useState(null)
   const [pitcherId, setPitcherId] = useState(null)
@@ -406,8 +406,8 @@ function WPDashboard() {
         on_1b: g.on_1b || false,
         on_2b: g.on_2b || false,
         on_3b: g.on_3b || false,
-        bat_score: g.bat_score || 0,
-        fld_score: g.fld_score || 0,
+        away_score: g.topbot === 'Top' ? g.bat_score : g.fld_score,
+        home_score: g.topbot === 'Bot' ? g.bat_score : g.fld_score,
         season: 2025,
       })
       if (g.batting_lineup?.length) setLineupIds(g.batting_lineup.map(p => p.id))
@@ -442,8 +442,11 @@ function WPDashboard() {
   const calculate = async () => {
     setLoading(true); setError(null)
     try {
+      const isTop = state.topbot === 'Top'
       const body = {
         ...state,
+        bat_score: isTop ? state.away_score : state.home_score,
+        fld_score: isTop ? state.home_score : state.away_score,
         batting_lineup: lineupIds || null,
         fielding_pitcher: pitcherId || null,
         kalshi_price: kalshiInput ? parseFloat(kalshiInput) / 100 : null,
@@ -534,18 +537,25 @@ function WPDashboard() {
         {/* Score + Bases */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
           <div style={{ flex: 1 }}>
-            <label style={labelStyle}>Score (Bat – Fld)</label>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              <div style={{ textAlign: 'center' }}>
-                <button onClick={() => update('bat_score', Math.max(0, state.bat_score - 1))} style={nudgeBtn}>−</button>
-                <span style={{ fontSize: 20, fontWeight: 800, color: '#f1f5f9', display: 'block', lineHeight: '28px' }}>{state.bat_score}</span>
-                <button onClick={() => update('bat_score', state.bat_score + 1)} style={nudgeBtn}>+</button>
+            <div style={{ display: 'flex', gap: 12 }}>
+              <div style={{ flex: 1 }}>
+                <label style={labelStyle}>Away</label>
+                <div style={{ textAlign: 'center' }}>
+                  <button onClick={() => update('away_score', Math.max(0, state.away_score - 1))} style={nudgeBtn}>−</button>
+                  <span style={{ fontSize: 22, fontWeight: 800, color: '#f1f5f9', display: 'block', lineHeight: '32px' }}>{state.away_score}</span>
+                  <button onClick={() => update('away_score', state.away_score + 1)} style={nudgeBtn}>+</button>
+                </div>
               </div>
-              <span style={{ color: '#475569', fontSize: 18 }}>–</span>
-              <div style={{ textAlign: 'center' }}>
-                <button onClick={() => update('fld_score', Math.max(0, state.fld_score - 1))} style={nudgeBtn}>−</button>
-                <span style={{ fontSize: 20, fontWeight: 800, color: '#f1f5f9', display: 'block', lineHeight: '28px' }}>{state.fld_score}</span>
-                <button onClick={() => update('fld_score', state.fld_score + 1)} style={nudgeBtn}>+</button>
+              <div style={{ display: 'flex', alignItems: 'center', paddingTop: 18 }}>
+                <span style={{ color: '#334155', fontSize: 18, fontWeight: 700 }}>@</span>
+              </div>
+              <div style={{ flex: 1 }}>
+                <label style={labelStyle}>Home</label>
+                <div style={{ textAlign: 'center' }}>
+                  <button onClick={() => update('home_score', Math.max(0, state.home_score - 1))} style={nudgeBtn}>−</button>
+                  <span style={{ fontSize: 22, fontWeight: 800, color: '#f1f5f9', display: 'block', lineHeight: '32px' }}>{state.home_score}</span>
+                  <button onClick={() => update('home_score', state.home_score + 1)} style={nudgeBtn}>+</button>
+                </div>
               </div>
             </div>
           </div>
