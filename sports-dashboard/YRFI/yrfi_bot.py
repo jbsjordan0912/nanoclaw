@@ -132,20 +132,21 @@ def scrape_ballparkpal(date: str) -> list[dict]:
 
         try:
             # Login
-            page.goto("https://www.ballparkpal.com/Login.php", wait_until="networkidle", timeout=30000)
+            page.goto("https://www.ballparkpal.com/Login.php", wait_until="domcontentloaded", timeout=30000)
+            page.wait_for_timeout(1500)
             page.fill("input[type='email']", BPP_EMAIL)
             page.fill("input[type='password']", BPP_PASSWORD)
             page.click("button[type='submit']")
-            page.wait_for_load_state("networkidle", timeout=15000)
+            page.wait_for_timeout(3000)
             print(f"  BPP login: {page.url}")
 
             # Game sims page
             page.goto(
                 f"https://www.ballparkpal.com/Game-Simulations.php?date={date}",
-                wait_until="networkidle",
+                wait_until="domcontentloaded",
                 timeout=30000,
             )
-            page.wait_for_timeout(4000)
+            page.wait_for_timeout(5000)
 
             body = page.inner_text("body")
             print(f"  BPP body length: {len(body)}")
