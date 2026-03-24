@@ -1,0 +1,8 @@
+[build]
+builder = "nixpacks"
+buildCommand = "pip install -r requirements.txt && playwright install chromium --with-deps"
+
+[deploy]
+cronSchedule = "*/30 * * * *"
+startCommand = "python yrfi_bot.py"
+restartPolicyType = "never"
