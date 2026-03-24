@@ -1,0 +1,7 @@
+[build]
+builder = "nixpacks"
+
+[deploy]
+cronSchedule = "*/10 * * * *"
+startCommand = "python yrfi_bot.py"
+restartPolicyType = "never"
