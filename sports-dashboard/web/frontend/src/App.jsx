@@ -636,27 +636,35 @@ function WPDashboard() {
         : kalshiOverrideRef.current !== null
           ? kalshiOverrideRef.current
           : (kalshiInput ? parseFloat(kalshiInput) / 100 : null)
-      // Explicit fields only — avoids cyclic structure errors from spreading state
+      // Explicit primitives only — safe to serialize
       const body = {
-        inning:           state.inning,
-        topbot:           state.topbot,
-        outs:             state.outs,
-        balls:            state.balls,
-        strikes:          state.strikes,
-        on_1b:            state.on_1b,
-        on_2b:            state.on_2b,
-        on_3b:            state.on_3b,
-        season:           state.season,
-        bat_score:        isTop ? state.away_score : state.home_score,
-        fld_score:        isTop ? state.home_score : state.away_score,
+        inning:           Number(state.inning),
+        topbot:           String(state.topbot),
+        outs:             Number(state.outs),
+        balls:            Number(state.balls),
+        strikes:          Number(state.strikes),
+        on_1b:            Boolean(state.on_1b),
+        on_2b:            Boolean(state.on_2b),
+        on_3b:            Boolean(state.on_3b),
+        season:           Number(state.season),
+        bat_score:        isTop ? Number(state.away_score) : Number(state.home_score),
+        fld_score:        isTop ? Number(state.home_score) : Number(state.away_score),
         batting_lineup:   Array.isArray(lineupIds) ? lineupIds.map(Number) : null,
-        fielding_pitcher: pitcherId ? Number(pitcherId) : null,
-        kalshi_price:     kPrice,
+        fielding_pitcher: pitcherId != null ? Number(pitcherId) : null,
+        kalshi_price:     kPrice != null ? Number(kPrice) : null,
+      }
+      let bodyStr
+      try {
+        bodyStr = JSON.stringify(body)
+      } catch (serr) {
+        console.error('Serialize failed:', serr)
+        Object.entries(body).forEach(([k, v]) => console.log(k, typeof v, v))
+        throw serr
       }
       const res = await fetch(`${API}/api/wp`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
+        body: bodyStr,
       })
       if (!res.ok) throw new Error(`Server error ${res.status}`)
       setWpData(await res.json())
