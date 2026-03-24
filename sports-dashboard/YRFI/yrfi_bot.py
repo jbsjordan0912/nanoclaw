@@ -103,6 +103,8 @@ def fetch_oddsblaze() -> list[dict]:
         under_price = odds_map.get("Under 0.5")
         if over_price is None or under_price is None:
             continue
+        over_price  = int(over_price)
+        under_price = int(under_price)
         results.append({
             "game_id":    ev["id"],
             "away":       ev["teams"]["away"]["name"],
