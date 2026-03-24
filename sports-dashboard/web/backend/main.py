@@ -371,30 +371,33 @@ def _kalshi_auth_headers(method: str, path: str) -> dict:
 
 @app.get("/api/kalshi/price")
 async def kalshi_price(home_team: str = "", away_team: str = ""):
-    """Fetch live Kalshi price for an MLB game contract."""
+    """Fetch live Kalshi price for an MLB game contract (regular season + spring training)."""
     import httpx
+    # Try regular season first, then spring training
+    series_tickers = ["KXMLBGAME", "KXMLBSTGAME"]
+    home_l = home_team.lower()
+    away_l = away_team.lower()
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
-            r = await client.get(
-                f"{KALSHI_API_BASE}/markets",
-                params={"status": "open", "series_ticker": "KXMLBGAME", "limit": 200},
-                headers={"accept": "application/json"},
-            )
-            if r.status_code != 200:
-                return {"price": None, "error": "Kalshi API unavailable"}
-            markets = r.json().get("markets", [])
-            home_l = home_team.lower()
-            away_l = away_team.lower()
-            for m in markets:
-                title = (m.get("title") or "").lower()
-                if (home_l and home_l in title) or (away_l and away_l in title):
-                    yes_bid = (m.get("yes_bid") or 0) / 100
-                    return {
-                        "price":        yes_bid,
-                        "market_title": m.get("title"),
-                        "ticker":       m.get("ticker"),
-                    }
-            return {"price": None, "error": "No matching market found"}
+            for series in series_tickers:
+                r = await client.get(
+                    f"{KALSHI_API_BASE}/markets",
+                    params={"status": "open", "series_ticker": series, "limit": 200},
+                    headers={"accept": "application/json"},
+                )
+                if r.status_code != 200:
+                    continue
+                for m in r.json().get("markets", []):
+                    title = (m.get("title") or "").lower()
+                    if (home_l and home_l in title) or (away_l and away_l in title):
+                        yes_bid = (m.get("yes_bid") or 0) / 100
+                        return {
+                            "price":        yes_bid,
+                            "market_title": m.get("title"),
+                            "ticker":       m.get("ticker"),
+                            "series":       series,
+                        }
+        return {"price": None, "error": "No matching market found"}
     except Exception as e:
         return {"price": None, "error": str(e)}
 
