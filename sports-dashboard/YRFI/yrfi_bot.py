@@ -1,10 +1,11 @@
 """
 YRFI Alert Bot
+- 8am ET: sends daily morning summary of ALL games
+- Every 30 min: sends pre-game alert ~1 hour before each game starts
 - Scrapes BallparkPal for sim-based YRFI %
 - Pulls Pinnacle market odds from OddsBlaze
-- Combines both into one Discord alert
+- Combines both into one Discord alert per game
 - Dupe-alert guard: only alerts once per game per day
-- Runs every 30 min via Railway cron
 """
 
 import os
@@ -23,9 +24,10 @@ SUPABASE_KEY    = os.environ["SUPABASE_KEY"]
 DISCORD_WEBHOOK = os.environ["DISCORD_WEBHOOK"]
 BPP_EMAIL       = os.environ["BPP_EMAIL"]
 BPP_PASSWORD    = os.environ["BPP_PASSWORD"]
-YRFI_THRESHOLD  = float(os.environ.get("YRFI_THRESHOLD", "60"))
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+MORNING_SUMMARY_SENT_KEY = "morning_summary"
 
 
 # ── Time helpers ──────────────────────────────────────────────────────────────
@@ -221,39 +223,35 @@ def mark_alerted(game_id: str, matchup: str):
     }).execute()
 
 
-# ── Discord ───────────────────────────────────────────────────────────────────
-def send_discord(away, home, pin_pct, over_odds, under_odds,
-                 bpp_pct=None, bpp_odds=None,
-                 away_win=None, home_win=None,
-                 away_pitcher=None, home_pitcher=None):
+# ── Discord: single game alert ────────────────────────────────────────────────
+def send_game_alert(away, home, pin_pct, over_odds, under_odds,
+                    bpp_pct=None, bpp_odds=None,
+                    away_win=None, home_win=None,
+                    away_pitcher=None, home_pitcher=None,
+                    title_prefix="🔔 First Pitch ~1 Hour"):
 
     best_pct = bpp_pct or pin_pct or 0
     color = 0x22c55e if best_pct >= 65 else 0xf59e0b
 
     fields = []
-
     if bpp_pct is not None:
         odds_str = f"  (fair: {bpp_odds:+d})" if bpp_odds else ""
-        fields.append({"name": "📊 BallparkPal (sim)",   "value": f"**{bpp_pct}%**{odds_str}", "inline": True})
-
+        fields.append({"name": "📊 BallparkPal (sim)",  "value": f"**{bpp_pct}%**{odds_str}", "inline": True})
     if pin_pct is not None:
         fields.append({"name": "📈 Pinnacle (market)", "value": f"**{pin_pct}%**  ({over_odds:+d} / {under_odds:+d})", "inline": True})
-
     if bpp_pct and pin_pct:
         edge = round(bpp_pct - pin_pct, 1)
         if abs(edge) >= 3:
             sign = "+" if edge > 0 else ""
             fields.append({"name": "⚡ Edge", "value": f"{sign}{edge}% vs market", "inline": True})
-
     if away_win and home_win:
         fields.append({"name": "🏆 Win %", "value": f"{away} {away_win}% / {home} {home_win}%", "inline": False})
-
     if away_pitcher or home_pitcher:
         fields.append({"name": "⚾ Starters", "value": f"{away_pitcher or '?'} vs {home_pitcher or '?'}", "inline": False})
 
     embed = {
         "embeds": [{
-            "title": f"🔔 First Pitch ~1 Hour: {away} @ {home}",
+            "title": f"{title_prefix}: {away} @ {home}",
             "fields": fields,
             "color": color,
             "footer": {"text": "BallparkPal sim + OddsBlaze Pinnacle"},
@@ -264,16 +262,76 @@ def send_discord(away, home, pin_pct, over_odds, under_odds,
     r.raise_for_status()
 
 
+# ── Discord: morning summary ──────────────────────────────────────────────────
+def send_morning_summary(odds_games: list[dict], bpp_games: list[dict]):
+    """Send one Discord message summarising all of today's games."""
+    if not odds_games:
+        return
+
+    lines = []
+    for g in sorted(odds_games, key=lambda x: x["start"]):
+        et_min = utc_to_et_minutes(g["start"])
+        time_str = f"{et_min//60}:{et_min%60:02d} ET" if et_min else "TBD"
+
+        # Match BPP
+        bpp = None
+        for b in bpp_games:
+            a_last = g["away"].split()[-1].lower()
+            if a_last in b.get("away", "").lower():
+                bpp = b
+                break
+
+        bpp_str = f"  BPP: {bpp['yrfi_pct']}%" if bpp and bpp.get("yrfi_pct") else ""
+        pin_str = f"  PIN: {g['yrfi_pct']}% ({g['over_odds']:+d}/{g['under_odds']:+d})"
+        lines.append(f"**{g['away']} @ {g['home']}** — {time_str}\n{pin_str}{bpp_str}")
+
+    description = "\n\n".join(lines)
+    embed = {
+        "embeds": [{
+            "title": f"⚾ Today's YRFI Slate — {today_et()}",
+            "description": description,
+            "color": 0x3b82f6,
+            "footer": {"text": "BallparkPal sim + OddsBlaze Pinnacle"},
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }]
+    }
+    r = requests.post(DISCORD_WEBHOOK, json=embed, timeout=10)
+    r.raise_for_status()
+    print("  ✓ Morning summary sent")
+
+
+# ── Dupe guard: morning summary ───────────────────────────────────────────────
+def morning_summary_sent_today() -> bool:
+    today = today_et()
+    result = (
+        supabase.table("yrfi_alerts_sent")
+        .select("game_id")
+        .eq("game_id", f"morning_summary_{today}")
+        .limit(1)
+        .execute()
+    )
+    return len(result.data) > 0
+
+
+def mark_morning_summary_sent():
+    today = today_et()
+    supabase.table("yrfi_alerts_sent").insert({
+        "game_id":    f"morning_summary_{today}",
+        "matchup":    "morning_summary",
+        "alerted_at": datetime.now(timezone.utc).isoformat(),
+    }).execute()
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 def run():
     now_min = et_now_minutes()
     today   = today_et()
-    win_lo  = now_min + 50
-    win_hi  = now_min + 80
-    print(f"\n[{datetime.now(timezone.utc).isoformat()}] YRFI Bot")
-    print(f"  ET: {now_min//60}:{now_min%60:02d}  |  Window: {win_lo//60}:{win_lo%60:02d}–{win_hi//60}:{win_hi%60:02d}")
+    is_morning = 8 * 60 <= now_min < 8 * 60 + 30   # 8:00–8:29 ET
 
-    # 1. OddsBlaze
+    print(f"\n[{datetime.now(timezone.utc).isoformat()}] YRFI Bot")
+    print(f"  ET: {now_min//60}:{now_min%60:02d}  |  Morning mode: {is_morning}")
+
+    # 1. Always fetch + upsert OddsBlaze
     print("\n→ Fetching OddsBlaze...")
     try:
         odds_games = fetch_oddsblaze()
@@ -290,42 +348,52 @@ def run():
         print(f"  OddsBlaze error: {e}")
         odds_games = []
 
-    # Check if any games are in window before scraping BPP
-    games_in_window = [
-        g for g in odds_games
-        if (et_min := utc_to_et_minutes(g["start"])) is not None
-        and win_lo <= et_min <= win_hi
-    ]
-
-    if not games_in_window:
-        print(f"\n  No games in window. Done.")
+    if not odds_games:
+        print("  No games today. Done.")
         return
 
-    # 2. BallparkPal (only if needed)
-    print(f"\n→ Scraping BallparkPal ({len(games_in_window)} game(s) in window)...")
+    # 2. Scrape BallparkPal (always needed for both modes)
+    print("\n→ Scraping BallparkPal...")
     try:
         bpp_games = scrape_ballparkpal(today)
     except Exception as e:
         print(f"  BPP error: {e}")
         bpp_games = []
 
-    # 3. Send alerts
+    # ── Morning summary ──
+    if is_morning:
+        if morning_summary_sent_today():
+            print("  Morning summary already sent today.")
+        else:
+            send_morning_summary(odds_games, bpp_games)
+            mark_morning_summary_sent()
+        return
+
+    # ── Pre-game alerts (~1 hour before each game) ──
+    win_lo = now_min + 50
+    win_hi = now_min + 80
+    print(f"\n→ Checking pre-game window: {win_lo//60}:{win_lo%60:02d}–{win_hi//60}:{win_hi%60:02d} ET")
+
+    games_in_window = [
+        g for g in odds_games
+        if (et_min := utc_to_et_minutes(g["start"])) is not None
+        and win_lo <= et_min <= win_hi
+    ]
+
     alerted = 0
     for g in games_in_window:
         if already_alerted(g["game_id"]):
             print(f"  Already alerted: {g['away']} @ {g['home']}")
             continue
 
-        # Match BPP data by team name
         bpp = None
         for b in bpp_games:
             a_last = g["away"].split()[-1].lower()
-            h_last = g["home"].split()[-1].lower()
-            if a_last in b.get("away", "").lower() or h_last in b.get("home", "").lower():
+            if a_last in b.get("away", "").lower():
                 bpp = b
                 break
 
-        send_discord(
+        send_game_alert(
             away         = g["away"],
             home         = g["home"],
             pin_pct      = g["yrfi_pct"],
@@ -342,6 +410,8 @@ def run():
         print(f"  ✓ Alert sent: {g['away']} @ {g['home']}")
         alerted += 1
 
+    if not games_in_window:
+        print("  No games in window.")
     print(f"\nDone. {alerted} alert(s) sent.\n")
 
 
