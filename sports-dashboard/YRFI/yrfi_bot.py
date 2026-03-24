@@ -44,15 +44,26 @@ def today_et() -> str:
     return et.strftime("%Y-%m-%d")
 
 
-def utc_to_et_minutes(utc_str: str) -> int | None:
-    """Parse ISO UTC string and return ET minutes since midnight."""
+def utc_to_et(utc_str: str) -> datetime | None:
+    """Parse ISO UTC string and return ET datetime."""
     try:
         dt = datetime.fromisoformat(utc_str.replace("Z", "+00:00"))
-        et = dt - timedelta(hours=4)
-        return et.hour * 60 + et.minute
+        return dt - timedelta(hours=4)
     except Exception as e:
         print(f"  Could not parse time '{utc_str}': {e}")
         return None
+
+
+def utc_to_et_minutes(utc_str: str) -> int | None:
+    """Parse ISO UTC string and return ET minutes since midnight."""
+    et = utc_to_et(utc_str)
+    return et.hour * 60 + et.minute if et else None
+
+
+def utc_to_et_date(utc_str: str) -> str | None:
+    """Parse ISO UTC string and return ET date as YYYY-MM-DD."""
+    et = utc_to_et(utc_str)
+    return et.strftime("%Y-%m-%d") if et else None
 
 
 # ── OddsBlaze ─────────────────────────────────────────────────────────────────
@@ -347,6 +358,10 @@ def run():
     except Exception as e:
         print(f"  OddsBlaze error: {e}")
         odds_games = []
+
+    # Filter to only TODAY's games in ET
+    odds_games = [g for g in odds_games if utc_to_et_date(g["start"]) == today]
+    print(f"  {len(odds_games)} games on {today} ET")
 
     if not odds_games:
         print("  No games today. Done.")
