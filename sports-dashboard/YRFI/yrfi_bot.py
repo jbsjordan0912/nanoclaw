@@ -32,13 +32,18 @@ MORNING_SUMMARY_SENT_KEY = "morning_summary"
 
 # ── Time helpers ──────────────────────────────────────────────────────────────
 def et_now_minutes() -> int:
-    """Current ET time as total minutes since midnight."""
+    """Current ET time as total minutes since midnight. Override with TEST_TIME env var."""
+    if test := os.environ.get("TEST_TIME"):
+        return int(test)
     now_utc = datetime.now(timezone.utc)
-    et = now_utc - timedelta(hours=4)  # EDT (UTC-4); adjust to -5 in winter
+    et = now_utc - timedelta(hours=4)
     return et.hour * 60 + et.minute
 
 
 def today_et() -> str:
+    """Today's date in ET. Override with TEST_DATE env var."""
+    if test := os.environ.get("TEST_DATE"):
+        return test
     now_utc = datetime.now(timezone.utc)
     et = now_utc - timedelta(hours=4)
     return et.strftime("%Y-%m-%d")
