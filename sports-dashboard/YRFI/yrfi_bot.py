@@ -154,60 +154,50 @@ def scrape_ballparkpal(date: str) -> list[dict]:
                 print("  No BPP game data for this date")
                 return games
 
-            # Try to find game cards
-            selectors = [
-                ".game-card", ".sim-card", "[class*='game-row']",
-                "[class*='GameCard']", "[class*='game_card']",
-                "table tr", ".container .row > div",
-            ]
-            blocks = []
-            for sel in selectors:
-                blocks = page.query_selector_all(sel)
-                if len(blocks) > 2:
-                    print(f"  Found {len(blocks)} blocks with selector '{sel}'")
-                    break
+            # BallparkPal uses .summaryDescriptionContainer for each game card
+            blocks = page.query_selector_all(".summaryDescriptionContainer")
+            print(f"  Found {len(blocks)} game cards")
 
             for block in blocks:
                 try:
-                    text = block.inner_text().strip()
-                    if len(text) < 20:
-                        continue
+                    away_divs = block.query_selector_all(".awayTeam")
+                    home_divs = block.query_selector_all(".homeTeam")
+                    yrfi_el   = block.query_selector(".yrfi")
+                    time_el   = block.query_selector(".atSymbol")
 
-                    # YRFI %
-                    yrfi_m = re.search(r'(?:YRFI|1st)[:\s]+(\d{2,3}\.?\d*)%', text, re.I)
-                    if not yrfi_m:
-                        yrfi_m = re.search(r'(\d{2,3}\.\d)%', text)
-                    yrfi_pct = float(yrfi_m.group(1)) if yrfi_m else None
+                    # Team names at index 1, pitchers at 2, win% at 4
+                    away    = away_divs[1].inner_text().strip() if len(away_divs) > 1 else None
+                    home    = home_divs[1].inner_text().strip() if len(home_divs) > 1 else None
+                    away_p  = away_divs[2].inner_text().strip() if len(away_divs) > 2 else None
+                    home_p  = home_divs[2].inner_text().strip() if len(home_divs) > 2 else None
+                    away_win_raw = away_divs[4].inner_text().strip() if len(away_divs) > 4 else None
+                    home_win_raw = home_divs[4].inner_text().strip() if len(home_divs) > 4 else None
 
-                    # Odds
-                    odds_m = re.search(r'([+-]\d{3,4})', text)
+                    # Parse YRFI: "YRFI: 40.6% (+146)"
+                    yrfi_text = yrfi_el.inner_text().strip() if yrfi_el else ""
+                    yrfi_m    = re.search(r'(\d+\.?\d*)%', yrfi_text)
+                    odds_m    = re.search(r'([+-]\d{3,4})', yrfi_text)
+                    yrfi_pct  = float(yrfi_m.group(1)) if yrfi_m else None
                     yrfi_odds = int(odds_m.group(1)) if odds_m else None
 
-                    # Win %
-                    win_pcts = re.findall(r'(\d{2,3}\.\d)%', text)
+                    # Parse win %: "(-120) 54.5%" or "45.5% (+120)"
+                    away_win_m = re.search(r'(\d+\.?\d*)%', away_win_raw or "")
+                    home_win_m = re.search(r'(\d+\.?\d*)%', home_win_raw or "")
 
-                    # Pitchers (look for "P. Name vs P. Name" or "Pitcher: X")
-                    pitcher_m = re.search(r'([A-Z][a-z]+ [A-Z][a-z]+)\s+vs\.?\s+([A-Z][a-z]+ [A-Z][a-z]+)', text)
-                    away_p = pitcher_m.group(1) if pitcher_m else None
-                    home_p = pitcher_m.group(2) if pitcher_m else None
-
-                    # Teams — look for known team name patterns
-                    team_m = re.search(r'([A-Z][a-z]+(?: [A-Z][a-z]+)?)\s+@\s+([A-Z][a-z]+(?: [A-Z][a-z]+)?)', text)
-                    away = team_m.group(1) if team_m else None
-                    home = team_m.group(2) if team_m else None
-
-                    if yrfi_pct and away and home:
+                    if away and home and yrfi_pct:
                         games.append({
-                            "away":          away,
-                            "home":          home,
-                            "yrfi_pct":      yrfi_pct,
-                            "yrfi_odds":     yrfi_odds,
-                            "away_win_pct":  float(win_pcts[0]) if len(win_pcts) > 0 else None,
-                            "home_win_pct":  float(win_pcts[1]) if len(win_pcts) > 1 else None,
-                            "away_pitcher":  away_p,
-                            "home_pitcher":  home_p,
+                            "away":         away,
+                            "home":         home,
+                            "yrfi_pct":     yrfi_pct,
+                            "yrfi_odds":    yrfi_odds,
+                            "away_win_pct": float(away_win_m.group(1)) if away_win_m else None,
+                            "home_win_pct": float(home_win_m.group(1)) if home_win_m else None,
+                            "away_pitcher": away_p,
+                            "home_pitcher": home_p,
                         })
+                        print(f"    {away} @ {home}  YRFI: {yrfi_pct}% ({yrfi_odds})")
                 except Exception as e:
+                    print(f"  Block parse error: {e}")
                     continue
 
         except Exception as e:
