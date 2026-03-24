@@ -430,9 +430,25 @@ async def kalshi_price(home_team: str = "", away_team: str = ""):
                 for m in r.json().get("markets", []):
                     title = (m.get("title") or "").lower()
                     if (home_k and home_k in title) or (away_k and away_k in title):
-                        yes_bid = (m.get("yes_bid") or 0) / 100
+                        yes_bid  = m.get("yes_bid")  or 0
+                        yes_ask  = m.get("yes_ask")  or 0
+                        last_price = m.get("last_price") or 0
+                        # Best price: midpoint → last trade → ask → bid
+                        if yes_bid > 0 and yes_ask > 0:
+                            price = (yes_bid + yes_ask) / 2 / 100
+                        elif last_price > 0:
+                            price = last_price / 100
+                        elif yes_ask > 0:
+                            price = yes_ask / 100
+                        elif yes_bid > 0:
+                            price = yes_bid / 100
+                        else:
+                            price = None
                         return {
-                            "price":        yes_bid,
+                            "price":        price,
+                            "yes_bid":      yes_bid / 100 if yes_bid else None,
+                            "yes_ask":      yes_ask / 100 if yes_ask else None,
+                            "last_price":   last_price / 100 if last_price else None,
                             "market_title": m.get("title"),
                             "ticker":       m.get("ticker"),
                             "series":       series,
