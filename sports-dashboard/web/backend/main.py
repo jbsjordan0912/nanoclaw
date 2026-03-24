@@ -369,14 +369,54 @@ def _kalshi_auth_headers(method: str, path: str) -> dict:
         return {}
 
 
+# Kalshi uses shortened city names — map MLB full names → Kalshi title fragments
+_MLB_KALSHI_NAME = {
+    "arizona diamondbacks":  "arizona",
+    "atlanta braves":        "atlanta",
+    "baltimore orioles":     "baltimore",
+    "boston red sox":        "boston",
+    "chicago cubs":          "chicago c",
+    "chicago white sox":     "chicago w",
+    "cincinnati reds":       "cincinnati",
+    "cleveland guardians":   "cleveland",
+    "colorado rockies":      "colorado",
+    "detroit tigers":        "detroit",
+    "houston astros":        "houston",
+    "kansas city royals":    "kansas city",
+    "los angeles angels":    "los angeles a",
+    "los angeles dodgers":   "los angeles d",
+    "miami marlins":         "miami",
+    "milwaukee brewers":     "milwaukee",
+    "minnesota twins":       "minnesota",
+    "new york mets":         "new york m",
+    "new york yankees":      "new york y",
+    "athletics":             "athletics",
+    "oakland athletics":     "athletics",
+    "philadelphia phillies": "philadelphia",
+    "pittsburgh pirates":    "pittsburgh",
+    "san diego padres":      "san diego",
+    "san francisco giants":  "san francisco",
+    "seattle mariners":      "seattle",
+    "st. louis cardinals":   "st. louis",
+    "tampa bay rays":        "tampa bay",
+    "texas rangers":         "texas",
+    "toronto blue jays":     "toronto",
+    "washington nationals":  "washington",
+}
+
+def _kalshi_name(team: str) -> str:
+    """Convert MLB full team name to Kalshi title fragment for matching."""
+    t = team.lower().strip()
+    return _MLB_KALSHI_NAME.get(t, t)
+
+
 @app.get("/api/kalshi/price")
 async def kalshi_price(home_team: str = "", away_team: str = ""):
     """Fetch live Kalshi price for an MLB game contract (regular season + spring training)."""
     import httpx
-    # Try regular season first, then spring training
+    home_k = _kalshi_name(home_team)
+    away_k = _kalshi_name(away_team)
     series_tickers = ["KXMLBGAME", "KXMLBSTGAME"]
-    home_l = home_team.lower()
-    away_l = away_team.lower()
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             for series in series_tickers:
@@ -389,7 +429,7 @@ async def kalshi_price(home_team: str = "", away_team: str = ""):
                     continue
                 for m in r.json().get("markets", []):
                     title = (m.get("title") or "").lower()
-                    if (home_l and home_l in title) or (away_l and away_l in title):
+                    if (home_k and home_k in title) or (away_k and away_k in title):
                         yes_bid = (m.get("yes_bid") or 0) / 100
                         return {
                             "price":        yes_bid,
