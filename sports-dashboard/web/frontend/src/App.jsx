@@ -468,6 +468,15 @@ function WPBar({ wp }) {
   )
 }
 
+// Derive WebSocket base URL from current host
+function getKalshiWsUrl(ticker) {
+  const isLocal = window.location.hostname === 'localhost'
+  const base = isLocal
+    ? 'ws://localhost:8000'
+    : 'wss://mlb-simulator-api.onrender.com'
+  return `${base}/api/ws/kalshi?ticker=${encodeURIComponent(ticker)}`
+}
+
 function WPDashboard() {
   const [mode, setMode] = useState('manual')          // 'auto' | 'manual'
   const [selectedGame, setSelectedGame] = useState(null)
@@ -482,11 +491,14 @@ function WPDashboard() {
   const [lineupIds, setLineupIds] = useState(null)
   const [pitcherId, setPitcherId] = useState(null)
   const [kalshiInput, setKalshiInput] = useState('')
+  const [kalshiLive, setKalshiLive] = useState(false)
   const [wpData, setWpData] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
   const pollRef = useRef(null)
   const lastSyncRef = useRef(null)
+  const kalshiWsRef = useRef(null)
+  const kalshiOverrideRef = useRef(null) // holds live price (0-1) for calculate()
 
   const toggleBase = (base) => setState(s => ({ ...s, [base]: !s[base] }))
   const update = (key, val) => setState(s => ({ ...s, [key]: val }))
@@ -554,17 +566,83 @@ function WPDashboard() {
     return () => clearInterval(t)
   }, [mode])
 
-  const calculate = async () => {
+  // Connect Kalshi WebSocket when in auto mode with a game selected
+  const connectKalshiWs = useCallback(async (gamePk) => {
+    // Tear down any existing connection
+    if (kalshiWsRef.current) {
+      kalshiWsRef.current.close()
+      kalshiWsRef.current = null
+    }
+    kalshiOverrideRef.current = null
+    setKalshiLive(false)
+    if (!gamePk) return
+
+    try {
+      // Resolve team names → Kalshi market ticker
+      const gr  = await fetch(`${API}/api/games/${gamePk}/state`)
+      if (!gr.ok) return
+      const g   = await gr.json()
+      const kr  = await fetch(`${API}/api/kalshi/price?home_team=${encodeURIComponent(g.home_team)}&away_team=${encodeURIComponent(g.away_team)}`)
+      const kd  = await kr.json()
+      if (!kd.ticker) return
+
+      const ws = new WebSocket(getKalshiWsUrl(kd.ticker))
+      kalshiWsRef.current = ws
+
+      ws.onmessage = (e) => {
+        const data = JSON.parse(e.data)
+        if (data.status === 'connected') {
+          setKalshiLive(true)
+        } else if (data.type === 'price') {
+          const pricePct = Math.round(data.yes_bid * 100)
+          kalshiOverrideRef.current = data.yes_bid
+          setKalshiInput(String(pricePct))
+          setKalshiLive(true)
+          // Recalculate edge with new live price
+          calculate(data.yes_bid)
+        } else if (data.error) {
+          console.warn('Kalshi WS error:', data.error)
+          setKalshiLive(false)
+        }
+      }
+      ws.onclose = () => { setKalshiLive(false); kalshiOverrideRef.current = null }
+      ws.onerror = () => { setKalshiLive(false) }
+    } catch (err) {
+      console.error('Kalshi WS setup failed:', err)
+    }
+  }, [])
+
+  // Open/close Kalshi WS based on mode + selected game
+  useEffect(() => {
+    if (mode === 'auto' && selectedGame) {
+      connectKalshiWs(selectedGame)
+    } else {
+      if (kalshiWsRef.current) { kalshiWsRef.current.close(); kalshiWsRef.current = null }
+      kalshiOverrideRef.current = null
+      setKalshiLive(false)
+    }
+    return () => {
+      if (kalshiWsRef.current) { kalshiWsRef.current.close(); kalshiWsRef.current = null }
+    }
+  }, [mode, selectedGame, connectKalshiWs])
+
+  const calculate = async (kalshiOverride = null) => {
     setLoading(true); setError(null)
     try {
       const isTop = state.topbot === 'Top'
+      // Use live WS price if available, then explicit override, then manual input
+      const kPrice = kalshiOverride !== null
+        ? kalshiOverride
+        : kalshiOverrideRef.current !== null
+          ? kalshiOverrideRef.current
+          : (kalshiInput ? parseFloat(kalshiInput) / 100 : null)
       const body = {
         ...state,
         bat_score: isTop ? state.away_score : state.home_score,
         fld_score: isTop ? state.home_score : state.away_score,
         batting_lineup: lineupIds || null,
         fielding_pitcher: pitcherId || null,
-        kalshi_price: kalshiInput ? parseFloat(kalshiInput) / 100 : null,
+        kalshi_price: kPrice,
       }
       const res = await fetch(`${API}/api/wp`, {
         method: 'POST',
@@ -712,16 +790,25 @@ function WPDashboard() {
       {/* Kalshi price input */}
       <div style={{ display: 'flex', gap: 10, marginBottom: 16, alignItems: 'flex-end' }}>
         <div style={{ flex: 1 }}>
-          <label style={labelStyle}>Kalshi Price (yes %)</label>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+            <label style={{ ...labelStyle, marginBottom: 0 }}>Kalshi Price (yes %)</label>
+            {kalshiLive
+              ? <span style={{ fontSize: 10, color: '#22c55e', fontWeight: 700, letterSpacing: '0.05em' }}>● LIVE</span>
+              : mode === 'auto' && selectedGame
+                ? <span style={{ fontSize: 10, color: '#475569', fontWeight: 600 }}>connecting…</span>
+                : null
+            }
+          </div>
           <input
             value={kalshiInput}
-            onChange={e => setKalshiInput(e.target.value)}
+            onChange={e => { setKalshiInput(e.target.value); kalshiOverrideRef.current = null }}
             onBlur={calculate}
             placeholder="e.g. 48"
             type="number"
             style={{
               width: '100%', padding: '10px 12px', borderRadius: 8,
-              background: '#1e293b', border: '1px solid #334155',
+              background: '#1e293b',
+              border: `1px solid ${kalshiLive ? '#22c55e55' : '#334155'}`,
               color: '#f1f5f9', fontSize: 15, outline: 'none', boxSizing: 'border-box',
             }}
           />

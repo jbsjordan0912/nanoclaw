@@ -5,12 +5,15 @@ Wraps the existing simulator.py logic and exposes it as a REST API.
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../../data-pipeline"))
 
-from fastapi import FastAPI, Query, HTTPException
+from fastapi import FastAPI, Query, HTTPException, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
 from dotenv import load_dotenv
+import asyncio, base64, time, json
 
+# Load backend .env first (Kalshi keys), then data-pipeline .env (Supabase etc.)
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 load_dotenv(os.path.join(os.path.dirname(__file__), "../../data-pipeline/.env"))
 
 import simulator as sim
@@ -319,8 +322,43 @@ async def game_state(game_pk: int):
 
 
 # ---------------------------------------------------------------------------
-# Kalshi price fetch
+# Kalshi helpers
 # ---------------------------------------------------------------------------
+
+KALSHI_API_BASE = "https://api.elections.kalshi.com/trade-api/v2"
+KALSHI_WS_URL   = "wss://api.elections.kalshi.com/trade-api/ws/v2"
+
+def _kalshi_auth_headers(method: str, path: str) -> dict:
+    """Build RSA-PSS signed headers for Kalshi API auth."""
+    key_id   = os.environ.get("KALSHI_API_KEY_ID", "")
+    key_path = os.environ.get("KALSHI_PRIVATE_KEY_PATH", "")
+    if not key_id or not key_path:
+        return {}
+    if not os.path.isabs(key_path):
+        key_path = os.path.join(os.path.dirname(__file__), key_path)
+    try:
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
+        with open(key_path, "rb") as f:
+            private_key = serialization.load_pem_private_key(f.read(), password=None)
+        ts  = str(int(time.time() * 1000))
+        msg = (ts + method.upper() + path).encode()
+        sig = private_key.sign(
+            msg,
+            asym_padding.PSS(
+                mgf=asym_padding.MGF1(hashes.SHA256()),
+                salt_length=asym_padding.PSS.MAX_LENGTH,
+            ),
+            hashes.SHA256(),
+        )
+        return {
+            "KALSHI-ACCESS-KEY":       key_id,
+            "KALSHI-ACCESS-TIMESTAMP": ts,
+            "KALSHI-ACCESS-SIGNATURE": base64.b64encode(sig).decode(),
+        }
+    except Exception:
+        return {}
+
 
 @app.get("/api/kalshi/price")
 async def kalshi_price(home_team: str = "", away_team: str = ""):
@@ -329,8 +367,8 @@ async def kalshi_price(home_team: str = "", away_team: str = ""):
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             r = await client.get(
-                "https://api.elections.kalshi.com/trade-api/v2/markets",
-                params={"status": "open", "series_ticker": "MLBGAME", "limit": 100},
+                f"{KALSHI_API_BASE}/markets",
+                params={"status": "open", "series_ticker": "KXMLBGAME", "limit": 200},
                 headers={"accept": "application/json"},
             )
             if r.status_code != 200:
@@ -343,10 +381,89 @@ async def kalshi_price(home_team: str = "", away_team: str = ""):
                 if (home_l and home_l in title) or (away_l and away_l in title):
                     yes_bid = (m.get("yes_bid") or 0) / 100
                     return {
-                        "price": yes_bid,
+                        "price":        yes_bid,
                         "market_title": m.get("title"),
-                        "ticker": m.get("ticker"),
+                        "ticker":       m.get("ticker"),
                     }
             return {"price": None, "error": "No matching market found"}
     except Exception as e:
         return {"price": None, "error": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# Kalshi WebSocket proxy — streams real-time price to frontend
+# ---------------------------------------------------------------------------
+
+@app.websocket("/api/ws/kalshi")
+async def kalshi_ws_proxy(websocket: WebSocket, ticker: str = ""):
+    """Subscribe to a single Kalshi market ticker and stream price updates."""
+    await websocket.accept()
+
+    if not ticker:
+        await websocket.send_json({"error": "no_ticker"})
+        await websocket.close()
+        return
+
+    auth_headers = _kalshi_auth_headers("GET", "/trade-api/ws/v2")
+    if not auth_headers:
+        await websocket.send_json({"error": "kalshi_auth_not_configured"})
+        await websocket.close()
+        return
+
+    stop = asyncio.Event()
+
+    async def stream_from_kalshi():
+        try:
+            import websockets as ws_lib
+            async with ws_lib.connect(KALSHI_WS_URL, additional_headers=auth_headers) as kws:
+                await kws.send(json.dumps({
+                    "id": 1,
+                    "cmd": "subscribe",
+                    "params": {"channels": ["ticker"], "market_tickers": [ticker]},
+                }))
+                while not stop.is_set():
+                    try:
+                        raw = await asyncio.wait_for(kws.recv(), timeout=30)
+                    except asyncio.TimeoutError:
+                        await kws.ping()
+                        continue
+                    data = json.loads(raw)
+                    t = data.get("type")
+                    if t == "subscribed":
+                        await websocket.send_json({"status": "connected", "ticker": ticker})
+                    elif t == "ticker":
+                        d  = data.get("msg", {})
+                        yb = d.get("yes_bid")
+                        ya = d.get("yes_ask")
+                        lp = d.get("last_price")
+                        if yb is not None:
+                            await websocket.send_json({
+                                "type":        "price",
+                                "yes_bid":     yb / 100,
+                                "yes_ask":     ya / 100 if ya is not None else None,
+                                "last_price":  lp / 100 if lp is not None else None,
+                            })
+        except Exception as e:
+            try:
+                await websocket.send_json({"error": str(e)})
+            except Exception:
+                pass
+        finally:
+            stop.set()
+
+    async def watch_disconnect():
+        try:
+            while not stop.is_set():
+                msg = await websocket.receive()
+                if msg.get("type") == "websocket.disconnect":
+                    break
+        except Exception:
+            pass
+        finally:
+            stop.set()
+
+    await asyncio.gather(stream_from_kalshi(), watch_disconnect())
+    try:
+        await websocket.close()
+    except Exception:
+        pass
