@@ -636,13 +636,22 @@ function WPDashboard() {
         : kalshiOverrideRef.current !== null
           ? kalshiOverrideRef.current
           : (kalshiInput ? parseFloat(kalshiInput) / 100 : null)
+      // Explicit fields only — avoids cyclic structure errors from spreading state
       const body = {
-        ...state,
-        bat_score: isTop ? state.away_score : state.home_score,
-        fld_score: isTop ? state.home_score : state.away_score,
-        batting_lineup: lineupIds || null,
-        fielding_pitcher: pitcherId || null,
-        kalshi_price: kPrice,
+        inning:           state.inning,
+        topbot:           state.topbot,
+        outs:             state.outs,
+        balls:            state.balls,
+        strikes:          state.strikes,
+        on_1b:            state.on_1b,
+        on_2b:            state.on_2b,
+        on_3b:            state.on_3b,
+        season:           state.season,
+        bat_score:        isTop ? state.away_score : state.home_score,
+        fld_score:        isTop ? state.home_score : state.away_score,
+        batting_lineup:   Array.isArray(lineupIds) ? lineupIds.map(Number) : null,
+        fielding_pitcher: pitcherId ? Number(pitcherId) : null,
+        kalshi_price:     kPrice,
       }
       const res = await fetch(`${API}/api/wp`, {
         method: 'POST',
