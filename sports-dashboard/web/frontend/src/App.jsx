@@ -593,12 +593,23 @@ function WPDashboard() {
         const data = JSON.parse(e.data)
         if (data.status === 'connected') {
           setKalshiLive(true)
+          // WS only pushes on price change — seed with current REST price immediately
+          fetch(`${API}/api/kalshi/price?home_team=${encodeURIComponent(g.home_team)}&away_team=${encodeURIComponent(g.away_team)}`)
+            .then(r => r.json())
+            .then(kd => {
+              if (kd.price != null) {
+                const pricePct = Math.round(kd.price * 100)
+                kalshiOverrideRef.current = kd.price
+                setKalshiInput(String(pricePct))
+                calculate(kd.price)
+              }
+            })
+            .catch(() => {})
         } else if (data.type === 'price') {
           const pricePct = Math.round(data.yes_bid * 100)
           kalshiOverrideRef.current = data.yes_bid
           setKalshiInput(String(pricePct))
           setKalshiLive(true)
-          // Recalculate edge with new live price
           calculate(data.yes_bid)
         } else if (data.error) {
           console.warn('Kalshi WS error:', data.error)
