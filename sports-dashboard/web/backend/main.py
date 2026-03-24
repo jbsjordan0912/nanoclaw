@@ -331,16 +331,25 @@ KALSHI_WS_URL   = "wss://api.elections.kalshi.com/trade-api/ws/v2"
 def _kalshi_auth_headers(method: str, path: str) -> dict:
     """Build RSA-PSS signed headers for Kalshi API auth."""
     key_id   = os.environ.get("KALSHI_API_KEY_ID", "")
-    key_path = os.environ.get("KALSHI_PRIVATE_KEY_PATH", "")
-    if not key_id or not key_path:
+    if not key_id:
         return {}
-    if not os.path.isabs(key_path):
-        key_path = os.path.join(os.path.dirname(__file__), key_path)
     try:
         from cryptography.hazmat.primitives import hashes, serialization
         from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
-        with open(key_path, "rb") as f:
-            private_key = serialization.load_pem_private_key(f.read(), password=None)
+        # Support key as env var (Render) or file path (local dev)
+        key_content = os.environ.get("KALSHI_PRIVATE_KEY", "")
+        if key_content:
+            # Env var: key PEM content directly (replace literal \n if needed)
+            key_bytes = key_content.replace("\\n", "\n").encode()
+        else:
+            key_path = os.environ.get("KALSHI_PRIVATE_KEY_PATH", "")
+            if not key_path:
+                return {}
+            if not os.path.isabs(key_path):
+                key_path = os.path.join(os.path.dirname(__file__), key_path)
+            with open(key_path, "rb") as f:
+                key_bytes = f.read()
+        private_key = serialization.load_pem_private_key(key_bytes, password=None)
         ts  = str(int(time.time() * 1000))
         msg = (ts + method.upper() + path).encode()
         sig = private_key.sign(
