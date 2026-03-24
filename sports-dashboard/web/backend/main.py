@@ -427,35 +427,119 @@ async def kalshi_price(home_team: str = "", away_team: str = ""):
                 )
                 if r.status_code != 200:
                     continue
+                # Collect all markets for this game (2 per game — one per team)
+                game_markets = []
                 for m in r.json().get("markets", []):
                     title = (m.get("title") or "").lower()
                     if (home_k and home_k in title) or (away_k and away_k in title):
-                        yes_bid  = m.get("yes_bid")  or 0
-                        yes_ask  = m.get("yes_ask")  or 0
-                        last_price = m.get("last_price") or 0
-                        # Best price: midpoint → last trade → ask → bid
-                        if yes_bid > 0 and yes_ask > 0:
-                            price = (yes_bid + yes_ask) / 2 / 100
-                        elif last_price > 0:
-                            price = last_price / 100
-                        elif yes_ask > 0:
-                            price = yes_ask / 100
-                        elif yes_bid > 0:
-                            price = yes_bid / 100
-                        else:
-                            price = None
-                        return {
-                            "price":        price,
-                            "yes_bid":      yes_bid / 100 if yes_bid else None,
-                            "yes_ask":      yes_ask / 100 if yes_ask else None,
-                            "last_price":   last_price / 100 if last_price else None,
-                            "market_title": m.get("title"),
-                            "ticker":       m.get("ticker"),
-                            "series":       series,
-                        }
+                        game_markets.append(m)
+                if not game_markets:
+                    continue
+
+                def _best_price(m):
+                    yb = m.get("yes_bid") or 0
+                    ya = m.get("yes_ask") or 0
+                    lp = m.get("last_price") or 0
+                    if yb > 0 and ya > 0: return (yb + ya) / 2 / 100
+                    if lp > 0:            return lp / 100
+                    if ya > 0:            return ya / 100
+                    if yb > 0:            return yb / 100
+                    return None
+
+                def _market_info(m):
+                    return {
+                        "price":        _best_price(m),
+                        "yes_bid":      (m.get("yes_bid") or 0) / 100,
+                        "yes_ask":      (m.get("yes_ask") or 0) / 100,
+                        "last_price":   (m.get("last_price") or 0) / 100,
+                        "market_title": m.get("title"),
+                        "ticker":       m.get("ticker"),
+                        "volume":       m.get("volume") or 0,
+                        "series":       series,
+                    }
+
+                # Pick the market with the most volume as primary
+                primary = max(game_markets, key=lambda m: m.get("volume") or 0)
+                other   = next((m for m in game_markets if m != primary), None)
+
+                result = _market_info(primary)
+                result["other"] = _market_info(other) if other else None
+                return result
         return {"price": None, "error": "No matching market found"}
     except Exception as e:
         return {"price": None, "error": str(e)}
+
+
+@app.get("/api/kalshi/prices/all")
+async def kalshi_prices_all():
+    """Fetch all open Kalshi MLB markets (regular season + spring training) grouped by game."""
+    import httpx, re
+    series_tickers = ["KXMLBGAME", "KXMLBSTGAME"]
+
+    def _best_price(m):
+        yb = m.get("yes_bid") or 0
+        ya = m.get("yes_ask") or 0
+        lp = m.get("last_price") or 0
+        if yb > 0 and ya > 0: return round((yb + ya) / 2 / 100, 4)
+        if lp > 0:             return round(lp / 100, 4)
+        if ya > 0:             return round(ya / 100, 4)
+        if yb > 0:             return round(yb / 100, 4)
+        return None
+
+    def _fmt(m, series):
+        p = _best_price(m)
+        return {
+            "ticker":       m.get("ticker"),
+            "title":        m.get("title"),
+            "price":        p,
+            "yes_bid":      round((m.get("yes_bid") or 0) / 100, 4),
+            "yes_ask":      round((m.get("yes_ask") or 0) / 100, 4),
+            "last_price":   round((m.get("last_price") or 0) / 100, 4),
+            "volume":       m.get("volume") or 0,
+            "series":       series,
+        }
+
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            all_markets = []
+            for series in series_tickers:
+                r = await client.get(
+                    f"{KALSHI_API_BASE}/markets",
+                    params={"status": "open", "series_ticker": series, "limit": 200},
+                    headers={"accept": "application/json"},
+                )
+                if r.status_code == 200:
+                    for m in r.json().get("markets", []):
+                        all_markets.append((m, series))
+
+            # Group markets into games — each game has 2 markets (one per team)
+            # Ticker format: SERIES-{DATE}{TIME}{AWAY}{HOME}-{WINNER}
+            # Group by everything except the last segment (team code)
+            games = {}
+            for m, series in all_markets:
+                ticker = m.get("ticker", "")
+                # Strip the last -TEAMCODE suffix to get a game key
+                game_key = re.sub(r"-[A-Z]{2,4}$", "", ticker)
+                if game_key not in games:
+                    games[game_key] = []
+                games[game_key].append(_fmt(m, series))
+
+            # Build game list sorted by volume desc
+            game_list = []
+            for key, markets in games.items():
+                markets.sort(key=lambda x: x["volume"], reverse=True)
+                total_vol = sum(m["volume"] for m in markets)
+                game_list.append({
+                    "game_key":  key,
+                    "markets":   markets,
+                    "total_volume": total_vol,
+                    "title":     markets[0]["title"] if markets else "",
+                })
+            game_list.sort(key=lambda g: g["total_volume"], reverse=True)
+
+            return {"games": game_list, "count": len(game_list)}
+    except Exception as e:
+        return {"games": [], "error": str(e)}
 
 
 # ---------------------------------------------------------------------------

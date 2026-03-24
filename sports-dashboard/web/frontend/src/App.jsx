@@ -468,6 +468,142 @@ function WPBar({ wp }) {
   )
 }
 
+// ---------------------------------------------------------------------------
+// Spring Training Odds Tab
+// ---------------------------------------------------------------------------
+function SpringOddsTab() {
+  const [games, setGames]       = useState([])
+  const [loading, setLoading]   = useState(true)
+  const [lastUpdated, setLastUpdated] = useState(null)
+  const [error, setError]       = useState(null)
+
+  const load = useCallback(async () => {
+    try {
+      const r = await fetch('/api/kalshi/prices/all')
+      const d = await r.json()
+      setGames(d.games || [])
+      setLastUpdated(new Date())
+      setError(null)
+    } catch (e) {
+      setError('Failed to load Kalshi prices')
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    load()
+    const id = setInterval(load, 30_000)
+    return () => clearInterval(id)
+  }, [load])
+
+  const fmtPct = v => v != null ? `${Math.round(v * 100)}¢` : '—'
+  const fmtVol = v => v >= 1000 ? `${(v / 1000).toFixed(1)}k` : String(v)
+
+  const priceColor = p => {
+    if (p == null) return '#64748b'
+    if (p >= 0.6)  return '#22c55e'
+    if (p >= 0.45) return '#f59e0b'
+    return '#ef4444'
+  }
+
+  return (
+    <div style={{ animation: 'fadeIn 0.3s ease' }}>
+      {/* Header row */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+        <div style={{ fontSize: 13, fontWeight: 700, color: '#94a3b8' }}>
+          🌸 SPRING TRAINING ODDS
+          {games.length > 0 && <span style={{ color: '#475569', fontWeight: 400, marginLeft: 6 }}>({games.length} games)</span>}
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          {lastUpdated && (
+            <span style={{ fontSize: 11, color: '#475569' }}>
+              Updated {lastUpdated.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+            </span>
+          )}
+          <button onClick={load} style={{
+            background: '#1e293b', border: '1px solid #334155', color: '#94a3b8',
+            borderRadius: 6, padding: '4px 10px', fontSize: 12, cursor: 'pointer',
+          }}>↻ Refresh</button>
+        </div>
+      </div>
+
+      {loading && (
+        <div style={{ textAlign: 'center', color: '#475569', padding: '40px 0', fontSize: 14 }}>Loading Kalshi markets…</div>
+      )}
+      {error && (
+        <div style={{ background: '#1e293b', border: '1px solid #ef4444', borderRadius: 10, padding: 14, color: '#ef4444', fontSize: 13 }}>{error}</div>
+      )}
+      {!loading && !error && games.length === 0 && (
+        <div style={{ textAlign: 'center', color: '#475569', padding: '40px 0', fontSize: 14 }}>No open Kalshi MLB markets found.</div>
+      )}
+
+      {/* Game cards */}
+      {games.map(g => (
+        <div key={g.game_key} style={{
+          background: '#1e293b', borderRadius: 12, padding: 14, marginBottom: 10,
+          border: '1px solid #334155',
+        }}>
+          {/* Game title */}
+          <div style={{ fontSize: 12, color: '#64748b', marginBottom: 10, letterSpacing: '0.02em' }}>
+            {(g.title || g.game_key).toUpperCase()}
+          </div>
+
+          {/* Markets */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {g.markets.map(m => (
+              <div key={m.ticker} style={{
+                background: '#0f172a', borderRadius: 8, padding: '10px 12px',
+                border: '1px solid #1e293b', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+              }}>
+                {/* Left: ticker label */}
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: '#e2e8f0', marginBottom: 2 }}>
+                    {(m.ticker || '').split('-').pop()}
+                  </div>
+                  <div style={{ fontSize: 10, color: '#475569' }}>
+                    Vol: {fmtVol(m.volume)}
+                  </div>
+                </div>
+
+                {/* Middle: bid / ask */}
+                <div style={{ textAlign: 'center', flex: 1 }}>
+                  <div style={{ fontSize: 11, color: '#475569', marginBottom: 2 }}>BID / ASK</div>
+                  <div style={{ fontSize: 13, color: '#94a3b8' }}>
+                    {fmtPct(m.yes_bid)} / {fmtPct(m.yes_ask)}
+                  </div>
+                </div>
+
+                {/* Right: best price */}
+                <div style={{ textAlign: 'right', flex: 1 }}>
+                  <div style={{ fontSize: 11, color: '#475569', marginBottom: 2 }}>PRICE</div>
+                  <div style={{ fontSize: 22, fontWeight: 800, color: priceColor(m.price), lineHeight: 1 }}>
+                    {m.price != null ? `${Math.round(m.price * 100)}¢` : '—'}
+                  </div>
+                  {m.last_price > 0 && (
+                    <div style={{ fontSize: 10, color: '#475569', marginTop: 2 }}>
+                      last {fmtPct(m.last_price)}
+                    </div>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Total volume */}
+          <div style={{ marginTop: 8, fontSize: 11, color: '#334155', textAlign: 'right' }}>
+            Total volume: {fmtVol(g.total_volume)}
+          </div>
+        </div>
+      ))}
+
+      <div style={{ fontSize: 11, color: '#334155', textAlign: 'center', paddingTop: 8 }}>
+        Auto-refreshes every 30s · Kalshi spring training markets
+      </div>
+    </div>
+  )
+}
+
 // Derive WebSocket base URL from current host
 function getKalshiWsUrl(ticker) {
   const isLocal = window.location.hostname === 'localhost'
@@ -945,9 +1081,13 @@ export default function App() {
 
       {/* Tab switcher */}
       <div style={{ display: 'flex', borderRadius: 10, overflow: 'hidden', border: '1px solid #1e293b', marginBottom: 20, background: '#1e293b' }}>
-        {[{ id: 'wp', label: '📊 WP / Kalshi' }, { id: 'sim', label: '⚾ At-Bat Sim' }].map(t => (
+        {[
+          { id: 'wp',     label: '📊 WP / Kalshi' },
+          { id: 'sim',    label: '⚾ At-Bat Sim' },
+          { id: 'spring', label: '🌸 Spring Odds' },
+        ].map(t => (
           <button key={t.id} onClick={() => setTab(t.id)} style={{
-            flex: 1, padding: '11px 0', border: 'none', fontSize: 14, fontWeight: 600,
+            flex: 1, padding: '11px 0', border: 'none', fontSize: 13, fontWeight: 600,
             background: tab === t.id ? '#2563eb' : 'transparent',
             color: tab === t.id ? '#fff' : '#64748b',
             cursor: 'pointer', transition: 'background 0.15s',
@@ -955,7 +1095,7 @@ export default function App() {
         ))}
       </div>
 
-      {tab === 'wp' ? <WPDashboard /> : <AtBatTab />}
+      {tab === 'wp' ? <WPDashboard /> : tab === 'sim' ? <AtBatTab /> : <SpringOddsTab />}
 
       <style>{`
         * { box-sizing: border-box; }
