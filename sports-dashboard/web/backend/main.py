@@ -412,128 +412,157 @@ def _kalshi_name(team: str) -> str:
 
 @app.get("/api/kalshi/price")
 async def kalshi_price(home_team: str = "", away_team: str = ""):
-    """Fetch live Kalshi price for an MLB game contract (regular season + spring training)."""
+    """Fetch live Kalshi price for an MLB game."""
     import httpx
     home_k = _kalshi_name(home_team)
-    away_k = _kalshi_name(away_team)
-    series_tickers = ["KXMLBGAME", "KXMLBSTGAME"]
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            for series in series_tickers:
-                r = await client.get(
-                    f"{KALSHI_API_BASE}/markets",
-                    params={"status": "open", "series_ticker": series, "limit": 200},
-                    headers={"accept": "application/json"},
-                )
-                if r.status_code != 200:
-                    continue
-                # Collect all markets for this game (2 per game — one per team)
-                game_markets = []
-                for m in r.json().get("markets", []):
-                    title = (m.get("title") or "").lower()
-                    if (home_k and home_k in title) or (away_k and away_k in title):
-                        game_markets.append(m)
-                if not game_markets:
-                    continue
-
-                def _best_price(m):
-                    yb = m.get("yes_bid") or 0
-                    ya = m.get("yes_ask") or 0
-                    lp = m.get("last_price") or 0
-                    if yb > 0 and ya > 0: return (yb + ya) / 2 / 100
-                    if lp > 0:            return lp / 100
-                    if ya > 0:            return ya / 100
-                    if yb > 0:            return yb / 100
-                    return None
-
-                def _market_info(m):
-                    return {
-                        "price":        _best_price(m),
-                        "yes_bid":      (m.get("yes_bid") or 0) / 100,
-                        "yes_ask":      (m.get("yes_ask") or 0) / 100,
-                        "last_price":   (m.get("last_price") or 0) / 100,
-                        "market_title": m.get("title"),
-                        "ticker":       m.get("ticker"),
-                        "volume":       m.get("volume") or 0,
-                        "series":       series,
-                    }
-
-                # Pick the market with the most volume as primary
-                primary = max(game_markets, key=lambda m: m.get("volume") or 0)
-                other   = next((m for m in game_markets if m != primary), None)
-
-                result = _market_info(primary)
-                result["other"] = _market_info(other) if other else None
-                return result
-        return {"price": None, "error": "No matching market found"}
-    except Exception as e:
-        return {"price": None, "error": str(e)}
-
-
-@app.get("/api/kalshi/prices/all")
-async def kalshi_prices_all():
-    """Fetch all open Kalshi MLB markets (regular season + spring training) grouped by game."""
-    import httpx, re
-    series_tickers = ["KXMLBGAME", "KXMLBSTGAME"]
-
-    def _best_price(m):
-        yb = m.get("yes_bid") or 0
-        ya = m.get("yes_ask") or 0
-        lp = m.get("last_price") or 0
-        if yb > 0 and ya > 0: return round((yb + ya) / 2 / 100, 4)
-        if lp > 0:             return round(lp / 100, 4)
-        if ya > 0:             return round(ya / 100, 4)
-        if yb > 0:             return round(yb / 100, 4)
-        return None
-
-    def _fmt(m, series):
-        p = _best_price(m)
-        return {
-            "ticker":       m.get("ticker"),
-            "title":        m.get("title"),
-            "price":        p,
-            "yes_bid":      round((m.get("yes_bid") or 0) / 100, 4),
-            "yes_ask":      round((m.get("yes_ask") or 0) / 100, 4),
-            "last_price":   round((m.get("last_price") or 0) / 100, 4),
-            "volume":       m.get("volume") or 0,
-            "series":       series,
-        }
-
+    away_k  = _kalshi_name(away_team)
     try:
         async with httpx.AsyncClient(timeout=8.0) as client:
-            all_markets = []
-            for series in series_tickers:
+            seen, all_markets = set(), []
+            for status in ("active", "open"):
                 r = await client.get(
                     f"{KALSHI_API_BASE}/markets",
-                    params={"status": "open", "series_ticker": series, "limit": 200},
+                    params={"series_ticker": "KXMLBGAME", "status": status, "limit": 200},
                     headers={"accept": "application/json"},
                 )
                 if r.status_code == 200:
                     for m in r.json().get("markets", []):
-                        all_markets.append((m, series))
+                        if m.get("ticker") and m["ticker"] not in seen:
+                            seen.add(m["ticker"])
+                            all_markets.append(m)
 
-            # Group markets into games — each game has 2 markets (one per team)
-            # Ticker format: SERIES-{DATE}{TIME}{AWAY}{HOME}-{WINNER}
-            # Group by everything except the last segment (team code)
+            matched = [
+                m for m in all_markets
+                if home_k and away_k
+                and home_k in (m.get("title") or "").lower()
+                and away_k in (m.get("title") or "").lower()
+            ]
+            if not matched:
+                return {"price": None, "error": "No matching market found"}
+
+            def _market_info(m):
+                yb = _parse_dollars(m.get("yes_bid_dollars") or m.get("yes_bid"))
+                ya = _parse_dollars(m.get("yes_ask_dollars") or m.get("yes_ask"))
+                lp = _parse_dollars(m.get("last_price_dollars") or m.get("last_price"))
+                price = None
+                if yb > 0 and ya > 0: price = round((yb + ya) / 2, 4)
+                elif lp > 0:          price = round(lp, 4)
+                elif ya > 0:          price = round(ya, 4)
+                elif yb > 0:          price = round(yb, 4)
+                return {
+                    "price":        price,
+                    "yes_bid":      round(yb, 4),
+                    "yes_ask":      round(ya, 4),
+                    "last_price":   round(lp, 4),
+                    "market_title": m.get("title"),
+                    "subtitle":     m.get("yes_sub_title"),
+                    "ticker":       m.get("ticker"),
+                    "volume":       _parse_volume(m),
+                }
+
+            primary = max(matched, key=lambda m: _parse_volume(m))
+            other   = next((m for m in matched if m != primary), None)
+            result  = _market_info(primary)
+            result["other"] = _market_info(other) if other else None
+            return result
+    except Exception as e:
+        return {"price": None, "error": str(e)}
+
+
+def _parse_dollars(val) -> float:
+    """Parse Kalshi dollar strings like '0.5400' or cent ints like 54 to float 0-1."""
+    if val is None:
+        return 0.0
+    if isinstance(val, str):
+        try:
+            return float(val)
+        except ValueError:
+            return 0.0
+    # If it's an int/float > 1, it's in cents
+    if isinstance(val, (int, float)) and val > 1:
+        return val / 100
+    return float(val)
+
+
+def _parse_volume(m) -> int:
+    """Extract volume from either volume_fp (list) or volume (detail) field."""
+    for key in ("volume_fp", "volume", "volume_24h_fp"):
+        v = m.get(key)
+        if v is not None:
+            try:
+                return int(float(v))
+            except (ValueError, TypeError):
+                pass
+    return 0
+
+
+@app.get("/api/kalshi/prices/all")
+async def kalshi_prices_all():
+    """Fetch all active Kalshi MLB markets grouped by game with real prices."""
+    import httpx, re
+
+    def _best_price(m):
+        yb = _parse_dollars(m.get("yes_bid_dollars") or m.get("yes_bid"))
+        ya = _parse_dollars(m.get("yes_ask_dollars") or m.get("yes_ask"))
+        lp = _parse_dollars(m.get("last_price_dollars") or m.get("last_price"))
+        if yb > 0 and ya > 0: return round((yb + ya) / 2, 4)
+        if lp > 0:             return round(lp, 4)
+        if ya > 0:             return round(ya, 4)
+        if yb > 0:             return round(yb, 4)
+        return None
+
+    def _fmt(m):
+        yb = _parse_dollars(m.get("yes_bid_dollars") or m.get("yes_bid"))
+        ya = _parse_dollars(m.get("yes_ask_dollars") or m.get("yes_ask"))
+        lp = _parse_dollars(m.get("last_price_dollars") or m.get("last_price"))
+        return {
+            "ticker":     m.get("ticker"),
+            "title":      m.get("title") or m.get("yes_sub_title"),
+            "subtitle":   m.get("yes_sub_title"),
+            "price":      _best_price(m),
+            "yes_bid":    round(yb, 4),
+            "yes_ask":    round(ya, 4),
+            "last_price": round(lp, 4),
+            "volume":     _parse_volume(m),
+        }
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            # Single request gets all data — list endpoint has _dollars fields
+            seen = set()
+            all_markets = []
+            for status in ("active", "open"):
+                r = await client.get(
+                    f"{KALSHI_API_BASE}/markets",
+                    params={"series_ticker": "KXMLBGAME", "status": status, "limit": 200},
+                    headers={"accept": "application/json"},
+                )
+                if r.status_code == 200:
+                    for m in r.json().get("markets", []):
+                        t = m.get("ticker")
+                        if t and t not in seen:
+                            seen.add(t)
+                            all_markets.append(m)
+
+            # Group by game (strip team code suffix from ticker)
             games = {}
-            for m, series in all_markets:
+            for m in all_markets:
                 ticker = m.get("ticker", "")
-                # Strip the last -TEAMCODE suffix to get a game key
                 game_key = re.sub(r"-[A-Z]{2,4}$", "", ticker)
                 if game_key not in games:
                     games[game_key] = []
-                games[game_key].append(_fmt(m, series))
+                games[game_key].append(_fmt(m))
 
-            # Build game list sorted by volume desc
+            # Sort games by total volume desc
             game_list = []
             for key, markets in games.items():
                 markets.sort(key=lambda x: x["volume"], reverse=True)
                 total_vol = sum(m["volume"] for m in markets)
                 game_list.append({
-                    "game_key":  key,
-                    "markets":   markets,
+                    "game_key":     key,
+                    "markets":      markets,
                     "total_volume": total_vol,
-                    "title":     markets[0]["title"] if markets else "",
+                    "title":        markets[0]["title"] if markets else key,
                 })
             game_list.sort(key=lambda g: g["total_volume"], reverse=True)
 
