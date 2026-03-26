@@ -576,12 +576,43 @@ async def kalshi_prices_all():
 # ---------------------------------------------------------------------------
 
 @app.websocket("/api/ws/kalshi")
-async def kalshi_ws_proxy(websocket: WebSocket, ticker: str = ""):
-    """Subscribe to a single Kalshi market ticker and stream price updates."""
+async def kalshi_ws_proxy(websocket: WebSocket, ticker: str = "", game_key: str = ""):
+    """Subscribe to both sides of a Kalshi game and stream price updates.
+
+    Pass either:
+      - ticker: a single market ticker (subscribes to that one)
+      - game_key: the game event ticker (e.g. KXMLBGAME-26MAR261615TBSTL)
+        → auto-finds both team tickers and subscribes to both
+    """
     await websocket.accept()
 
-    if not ticker:
-        await websocket.send_json({"error": "no_ticker"})
+    # Resolve tickers to subscribe to
+    tickers = []
+    ticker_team_map = {}  # ticker → team abbreviation (e.g. "TB", "STL")
+
+    if game_key:
+        # Find both tickers for this game from the market list
+        import httpx
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            for status in ("active", "open"):
+                r = await client.get(
+                    f"{KALSHI_API_BASE}/markets",
+                    params={"series_ticker": "KXMLBGAME", "status": status, "limit": 200},
+                    headers={"accept": "application/json"},
+                )
+                if r.status_code == 200:
+                    for m in r.json().get("markets", []):
+                        t = m.get("ticker", "")
+                        if t.startswith(game_key + "-") and t not in ticker_team_map:
+                            team = t.split("-")[-1]
+                            tickers.append(t)
+                            ticker_team_map[t] = team
+    elif ticker:
+        tickers = [ticker]
+        ticker_team_map[ticker] = ticker.split("-")[-1]
+
+    if not tickers:
+        await websocket.send_json({"error": "no_tickers_found"})
         await websocket.close()
         return
 
@@ -600,7 +631,7 @@ async def kalshi_ws_proxy(websocket: WebSocket, ticker: str = ""):
                 await kws.send(json.dumps({
                     "id": 1,
                     "cmd": "subscribe",
-                    "params": {"channels": ["ticker"], "market_tickers": [ticker]},
+                    "params": {"channels": ["ticker"], "market_tickers": tickers},
                 }))
                 while not stop.is_set():
                     try:
@@ -611,20 +642,28 @@ async def kalshi_ws_proxy(websocket: WebSocket, ticker: str = ""):
                     data = json.loads(raw)
                     t = data.get("type")
                     if t == "subscribed":
-                        await websocket.send_json({"status": "connected", "ticker": ticker})
+                        await websocket.send_json({
+                            "status": "connected",
+                            "tickers": tickers,
+                            "teams": ticker_team_map,
+                        })
                     elif t == "ticker":
-                        d  = data.get("msg", {})
-                        yb = _parse_dollars(d.get("yes_bid_dollars"))
-                        ya = _parse_dollars(d.get("yes_ask_dollars"))
-                        lp = _parse_dollars(d.get("price_dollars"))
+                        d   = data.get("msg", {})
+                        mt  = d.get("market_ticker", "")
+                        team = ticker_team_map.get(mt, mt.split("-")[-1])
+                        yb  = _parse_dollars(d.get("yes_bid_dollars"))
+                        ya  = _parse_dollars(d.get("yes_ask_dollars"))
+                        lp  = _parse_dollars(d.get("price_dollars"))
                         vol = d.get("volume_fp")
                         if yb > 0 or ya > 0 or lp > 0:
                             await websocket.send_json({
-                                "type":        "price",
-                                "yes_bid":     yb,
-                                "yes_ask":     ya,
-                                "last_price":  lp,
-                                "volume":      int(float(vol)) if vol else None,
+                                "type":       "price",
+                                "team":       team,
+                                "ticker":     mt,
+                                "yes_bid":    yb,
+                                "yes_ask":    ya,
+                                "last_price": lp,
+                                "volume":     int(float(vol)) if vol else None,
                             })
         except Exception as e:
             try:

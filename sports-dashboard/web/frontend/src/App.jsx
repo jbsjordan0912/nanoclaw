@@ -607,11 +607,12 @@ function SpringOddsTab() {
 }
 
 // Derive WebSocket base URL from current host
-function getKalshiWsUrl(ticker) {
+function getKalshiWsUrl({ ticker, gameKey } = {}) {
   const isLocal = window.location.hostname === 'localhost'
   const base = isLocal
     ? 'ws://localhost:8000'
     : 'wss://mlb-simulator-api.onrender.com'
+  if (gameKey) return `${base}/api/ws/kalshi?game_key=${encodeURIComponent(gameKey)}`
   return `${base}/api/ws/kalshi?ticker=${encodeURIComponent(ticker)}`
 }
 
@@ -630,6 +631,7 @@ function WPDashboard() {
   const [pitcherId, setPitcherId] = useState(null)
   const [kalshiInput, setKalshiInput] = useState('')
   const [kalshiLive, setKalshiLive] = useState(false)
+  const kalshiPricesRef = useRef({}) // { "TB": {bid, ask, last}, "STL": {bid, ask, last} }
   const [wpData, setWpData] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
@@ -704,7 +706,7 @@ function WPDashboard() {
     return () => clearInterval(t)
   }, [mode])
 
-  // Connect Kalshi WebSocket when in auto mode with a game selected
+  // Connect Kalshi WebSocket — subscribes to BOTH sides of the game
   const connectKalshiWs = useCallback(async (gamePk) => {
     // Tear down any existing connection
     if (kalshiWsRef.current) {
@@ -712,51 +714,91 @@ function WPDashboard() {
       kalshiWsRef.current = null
     }
     kalshiOverrideRef.current = null
+    kalshiPricesRef.current = {}
     setKalshiLive(false)
     if (!gamePk) return
 
     try {
-      // Resolve team names → Kalshi market ticker
-      const gr  = await fetch(`${API}/api/games/${gamePk}/state`)
+      // Resolve game → Kalshi game key
+      const gr = await fetch(`${API}/api/games/${gamePk}/state`)
       if (!gr.ok) return
-      const g   = await gr.json()
-      const kr  = await fetch(`${API}/api/kalshi/price?home_team=${encodeURIComponent(g.home_team)}&away_team=${encodeURIComponent(g.away_team)}`)
-      const kd  = await kr.json()
+      const g = await gr.json()
+      const kr = await fetch(`${API}/api/kalshi/price?home_team=${encodeURIComponent(g.home_team)}&away_team=${encodeURIComponent(g.away_team)}`)
+      const kd = await kr.json()
       if (!kd.ticker) return
 
-      const ws = new WebSocket(getKalshiWsUrl(kd.ticker))
+      // Extract game key (ticker without the team suffix)
+      const gameKey = kd.ticker.replace(/-[A-Z]{2,4}$/, '')
+
+      // Seed both sides from REST
+      if (kd.price != null) {
+        const team = kd.ticker.split('-').pop()
+        kalshiPricesRef.current[team] = { bid: kd.yes_bid, ask: kd.yes_ask, last: kd.last_price }
+      }
+      if (kd.other?.price != null) {
+        const team = kd.other.ticker.split('-').pop()
+        kalshiPricesRef.current[team] = { bid: kd.other.yes_bid, ask: kd.other.yes_ask, last: kd.other.last_price }
+      }
+
+      // Determine which team abbreviations map to home/away
+      // Store mapping so we can pick the right price based on batting team
+      const tickerTeams = Object.keys(kalshiPricesRef.current)
+      kalshiPricesRef.current._homeTeam = g.home_team
+      kalshiPricesRef.current._awayTeam = g.away_team
+      kalshiPricesRef.current._homeAbbr = tickerTeams.find(t =>
+        kd.ticker.includes(t) && (kd.subtitle || '').toLowerCase().includes(g.home_team.split(' ').pop().toLowerCase())
+      ) || tickerTeams[1] || ''
+      kalshiPricesRef.current._awayAbbr = tickerTeams.find(t => t !== kalshiPricesRef.current._homeAbbr) || tickerTeams[0] || ''
+
+      // Set initial display — show home team price
+      updateKalshiDisplay()
+
+      // Connect WS to both tickers
+      const ws = new WebSocket(getKalshiWsUrl({ gameKey }))
       kalshiWsRef.current = ws
 
       ws.onmessage = (e) => {
         const data = JSON.parse(e.data)
         if (data.status === 'connected') {
           setKalshiLive(true)
-          // WS only pushes on price change — seed with current REST price immediately
-          fetch(`${API}/api/kalshi/price?home_team=${encodeURIComponent(g.home_team)}&away_team=${encodeURIComponent(g.away_team)}`)
-            .then(r => r.json())
-            .then(kd => {
-              if (kd.price != null) {
-                kalshiOverrideRef.current = kd.price
-                setKalshiInput(String(Math.round(kd.price * 100)))
-              }
-            })
-            .catch(() => {})
         } else if (data.type === 'price') {
-          const wsMid = (data.yes_bid > 0 && data.yes_ask > 0)
-            ? (data.yes_bid + data.yes_ask) / 2
-            : data.last_price || data.yes_bid
-          kalshiOverrideRef.current = wsMid
-          setKalshiInput(String(Math.round(wsMid * 100)))
+          const team = data.team
+          kalshiPricesRef.current[team] = {
+            bid: data.yes_bid,
+            ask: data.yes_ask,
+            last: data.last_price,
+          }
+          updateKalshiDisplay()
           setKalshiLive(true)
         } else if (data.error) {
           console.warn('Kalshi WS error:', data.error)
           setKalshiLive(false)
         }
       }
-      ws.onclose = () => { setKalshiLive(false); kalshiOverrideRef.current = null }
+      ws.onclose = () => { setKalshiLive(false) }
       ws.onerror = () => { setKalshiLive(false) }
     } catch (err) {
       console.error('Kalshi WS setup failed:', err)
+    }
+  }, [])
+
+  // Update Kalshi display based on current batting team
+  const updateKalshiDisplay = useCallback(() => {
+    const prices = kalshiPricesRef.current
+    const homeAbbr = prices._homeAbbr
+    const awayAbbr = prices._awayAbbr
+    if (!homeAbbr && !awayAbbr) return
+
+    // Show home team price by default (edge calculation uses batting team,
+    // but display shows the home team's win probability)
+    const homeP = prices[homeAbbr]
+    const awayP = prices[awayAbbr]
+    if (homeP) {
+      const mid = (homeP.bid > 0 && homeP.ask > 0)
+        ? (homeP.bid + homeP.ask) / 2
+        : homeP.last || homeP.bid
+      kalshiOverrideRef.current = mid
+      setKalshiInput(String(Math.round(mid * 100)))
     }
   }, [])
 
@@ -778,12 +820,20 @@ function WPDashboard() {
     setLoading(true); setError(null)
     try {
       const isTop = state.topbot === 'Top'
-      // Use live WS price if available, then explicit override, then manual input
-      const kPrice = kalshiOverride !== null
-        ? kalshiOverride
-        : kalshiOverrideRef.current !== null
-          ? kalshiOverrideRef.current
-          : (kalshiInput ? parseFloat(kalshiInput) / 100 : null)
+      // Pick the batting team's Kalshi price from live WS data
+      let kPrice = null
+      const prices = kalshiPricesRef.current
+      const battingAbbr = isTop ? prices._awayAbbr : prices._homeAbbr
+      const battingP = prices[battingAbbr]
+      if (battingP) {
+        kPrice = (battingP.bid > 0 && battingP.ask > 0)
+          ? (battingP.bid + battingP.ask) / 2
+          : battingP.last || battingP.bid
+      }
+      // Fall back to manual input if no live data
+      if (kPrice == null && kalshiInput) {
+        kPrice = parseFloat(kalshiInput) / 100
+      }
       // Explicit primitives only — safe to serialize
       const body = {
         inning:           Number(state.inning),
