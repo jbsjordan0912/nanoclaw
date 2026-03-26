@@ -1,6 +1,8 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
 
-const API = ''  // proxied via vite dev server
+const API = window.location.hostname === 'localhost'
+  ? ''  // proxied via vite dev server
+  : 'https://mlb-simulator-api.onrender.com'
 
 // ── Utility ──────────────────────────────────────────────────────────────────
 const pct = (v) => v != null ? `${(v * 100).toFixed(1)}%` : '—'
