@@ -736,19 +736,15 @@ function WPDashboard() {
             .then(r => r.json())
             .then(kd => {
               if (kd.price != null) {
-                const pricePct = Math.round(kd.price * 100)
                 kalshiOverrideRef.current = kd.price
-                setKalshiInput(String(pricePct))
-                calculate(kd.price)
+                setKalshiInput(String(Math.round(kd.price * 100)))
               }
             })
             .catch(() => {})
         } else if (data.type === 'price') {
-          const pricePct = Math.round(data.yes_bid * 100)
           kalshiOverrideRef.current = data.yes_bid
-          setKalshiInput(String(pricePct))
+          setKalshiInput(String(Math.round(data.yes_bid * 100)))
           setKalshiLive(true)
-          calculate(data.yes_bid)
         } else if (data.error) {
           console.warn('Kalshi WS error:', data.error)
           setKalshiLive(false)
@@ -774,7 +770,8 @@ function WPDashboard() {
         kalshiOverrideRef.current = kd.price
         setKalshiInput(String(Math.round(kd.price * 100)))
         setKalshiLive(true)
-        calculate(kd.price)
+        // Don't call calculate() here — stale closure over state.
+        // The useEffect on [state] handles recalculation with fresh state.
       }
     } catch {}
   }, [])
