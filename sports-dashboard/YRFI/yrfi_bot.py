@@ -1,10 +1,10 @@
 """
-YRFI Alert Bot
-- 8am ET: sends daily morning summary of ALL games
+NRFI Alert Bot (multi-book)
+- 8am ET: sends daily morning summary of ALL games with NRFI % from every available book
 - Every 30 min: sends pre-game alert ~1 hour before each game starts
-- Scrapes BallparkPal for sim-based YRFI %
-- Pulls Pinnacle market odds from OddsBlaze
-- Combines both into one Discord alert per game
+- Scrapes BallparkPal for sim-based NRFI % (100 - YRFI%)
+- Pulls 1st inning odds from all available sportsbooks via OddsBlaze
+- De-vigs each book's line independently, shows all side by side
 - Dupe-alert guard: only alerts once per game per day
 """
 
@@ -27,7 +27,12 @@ BPP_PASSWORD    = os.environ["BPP_PASSWORD"]
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-MORNING_SUMMARY_SENT_KEY = "morning_summary"
+# Books to check, in priority order (sharpest first for consensus)
+SPORTSBOOKS = ["pinnacle", "caesars", "fanduel", "draftkings", "betmgm", "bet365", "bovada"]
+BOOK_LABELS = {
+    "pinnacle": "PIN", "caesars": "CZR", "fanduel": "FD",
+    "draftkings": "DK", "betmgm": "MGM", "bet365": "365", "bovada": "BOV",
+}
 
 
 # ── Time helpers ──────────────────────────────────────────────────────────────
@@ -71,58 +76,97 @@ def utc_to_et_date(utc_str: str) -> str | None:
     return et.strftime("%Y-%m-%d") if et else None
 
 
-# ── OddsBlaze ─────────────────────────────────────────────────────────────────
+# ── OddsBlaze (multi-book) ───────────────────────────────────────────────────
 def american_to_prob(price: int) -> float:
     if price > 0:
         return 100 / (price + 100)
     return abs(price) / (abs(price) + 100)
 
 
-def fair_yrfi_pct(over_price: int, under_price: int) -> float:
+def fair_nrfi_pct(over_price: int, under_price: int) -> float:
+    """De-vig and return fair NRFI % (Under 0.5 = no run first inning)."""
     over_imp  = american_to_prob(over_price)
     under_imp = american_to_prob(under_price)
-    return round((over_imp / (over_imp + under_imp)) * 100, 1)
+    return round((under_imp / (over_imp + under_imp)) * 100, 1)
 
 
-def fetch_oddsblaze() -> list[dict]:
-    resp = requests.get(
-        "https://odds.oddsblaze.com/",
-        params={
-            "key":        ODDS_KEY,
-            "sportsbook": "pinnacle",
-            "league":     "mlb",
-            "market":     "1st-inning-total-runs",
-        },
-        timeout=15,
-    )
-    resp.raise_for_status()
-    results = []
-    for ev in resp.json().get("events", []):
-        odds_map    = {o["name"]: o["price"] for o in ev.get("odds", [])}
-        over_price  = odds_map.get("Over 0.5")
-        under_price = odds_map.get("Under 0.5")
-        if over_price is None or under_price is None:
-            continue
-        over_price  = int(over_price)
-        under_price = int(under_price)
-        results.append({
-            "game_id":    ev["id"],
-            "away":       ev["teams"]["away"]["name"],
-            "home":       ev["teams"]["home"]["name"],
-            "start":      ev["date"],
-            "yrfi_pct":   fair_yrfi_pct(over_price, under_price),
-            "over_odds":  over_price,
-            "under_odds": under_price,
-        })
-    return results
+def fetch_all_books() -> dict:
+    """
+    Fetch 1st inning odds from all available sportsbooks.
+    Returns dict keyed by (away_team, home_team) with structure:
+    {
+        "game_id": str, "away": str, "home": str, "start": str,
+        "books": { "pinnacle": {"nrfi_pct": float, "over": int, "under": int}, ... }
+    }
+    """
+    games = {}
+
+    for book in SPORTSBOOKS:
+        try:
+            resp = requests.get(
+                "https://odds.oddsblaze.com/",
+                params={
+                    "key":        ODDS_KEY,
+                    "sportsbook": book,
+                    "league":     "mlb",
+                    "market":     "1st-inning-total-runs",
+                },
+                timeout=15,
+            )
+            resp.raise_for_status()
+            events = resp.json().get("events", [])
+            if not events:
+                continue
+            print(f"  {book}: {len(events)} games")
+
+            for ev in events:
+                odds_map    = {o["name"]: o["price"] for o in ev.get("odds", [])}
+                over_price  = odds_map.get("Over 0.5")
+                under_price = odds_map.get("Under 0.5")
+                if over_price is None or under_price is None:
+                    continue
+                over_price  = int(over_price)
+                under_price = int(under_price)
+
+                away = ev["teams"]["away"]["name"]
+                home = ev["teams"]["home"]["name"]
+                key  = (away, home)
+
+                if key not in games:
+                    games[key] = {
+                        "game_id": ev["id"],
+                        "away":    away,
+                        "home":    home,
+                        "start":   ev["date"],
+                        "books":   {},
+                    }
+
+                games[key]["books"][book] = {
+                    "nrfi_pct": fair_nrfi_pct(over_price, under_price),
+                    "over":     over_price,
+                    "under":    under_price,
+                }
+
+        except Exception as e:
+            print(f"  {book} error: {e}")
+
+    return games
+
+
+def best_nrfi_pct(game: dict) -> float | None:
+    """Get the best NRFI % — prefer Pinnacle, then first available sharp book."""
+    books = game.get("books", {})
+    for book in SPORTSBOOKS:
+        if book in books:
+            return books[book]["nrfi_pct"]
+    return None
 
 
 # ── BallparkPal scraper ───────────────────────────────────────────────────────
 def scrape_ballparkpal(date: str) -> list[dict]:
     """
     Log into BallparkPal, scrape game sim data.
-    Returns list of dicts: away, home, yrfi_pct, yrfi_odds,
-    away_win_pct, home_win_pct, away_pitcher, home_pitcher
+    Returns NRFI % (100 - YRFI%) along with other game data.
     """
     games = []
 
@@ -164,7 +208,6 @@ def scrape_ballparkpal(date: str) -> list[dict]:
                     away_divs = block.query_selector_all(".awayTeam")
                     home_divs = block.query_selector_all(".homeTeam")
                     yrfi_el   = block.query_selector(".yrfi")
-                    time_el   = block.query_selector(".atSymbol")
 
                     # Team names at index 1, pitchers at 2, win% at 4
                     away    = away_divs[1].inner_text().strip() if len(away_divs) > 1 else None
@@ -174,29 +217,30 @@ def scrape_ballparkpal(date: str) -> list[dict]:
                     away_win_raw = away_divs[4].inner_text().strip() if len(away_divs) > 4 else None
                     home_win_raw = home_divs[4].inner_text().strip() if len(home_divs) > 4 else None
 
-                    # Parse YRFI: "YRFI: 40.6% (+146)"
+                    # Parse YRFI: "YRFI: 40.6% (+146)" → convert to NRFI
                     yrfi_text = yrfi_el.inner_text().strip() if yrfi_el else ""
                     yrfi_m    = re.search(r'(\d+\.?\d*)%', yrfi_text)
                     odds_m    = re.search(r'([+-]\d{3,4})', yrfi_text)
                     yrfi_pct  = float(yrfi_m.group(1)) if yrfi_m else None
+                    nrfi_pct  = round(100 - yrfi_pct, 1) if yrfi_pct is not None else None
                     yrfi_odds = int(odds_m.group(1)) if odds_m else None
 
-                    # Parse win %: "(-120) 54.5%" or "45.5% (+120)"
+                    # Parse win %
                     away_win_m = re.search(r'(\d+\.?\d*)%', away_win_raw or "")
                     home_win_m = re.search(r'(\d+\.?\d*)%', home_win_raw or "")
 
-                    if away and home and yrfi_pct:
+                    if away and home and nrfi_pct is not None:
                         games.append({
                             "away":         away,
                             "home":         home,
-                            "yrfi_pct":     yrfi_pct,
+                            "nrfi_pct":     nrfi_pct,
                             "yrfi_odds":    yrfi_odds,
                             "away_win_pct": float(away_win_m.group(1)) if away_win_m else None,
                             "home_win_pct": float(home_win_m.group(1)) if home_win_m else None,
                             "away_pitcher": away_p,
                             "home_pitcher": home_p,
                         })
-                        print(f"    {away} @ {home}  YRFI: {yrfi_pct}% ({yrfi_odds})")
+                        print(f"    {away} @ {home}  NRFI: {nrfi_pct}%")
                 except Exception as e:
                     print(f"  Block parse error: {e}")
                     continue
@@ -233,37 +277,62 @@ def mark_alerted(game_id: str, matchup: str):
 
 
 # ── Discord: single game alert ────────────────────────────────────────────────
-def send_game_alert(away, home, pin_pct, over_odds, under_odds,
-                    bpp_pct=None, bpp_odds=None,
+def send_game_alert(away, home, books, bpp_nrfi=None,
                     away_win=None, home_win=None,
                     away_pitcher=None, home_pitcher=None,
                     title_prefix="🔔 First Pitch ~1 Hour"):
 
-    best_pct = bpp_pct or pin_pct or 0
-    color = 0x22c55e if best_pct >= 65 else 0xf59e0b
+    # Use best available NRFI %
+    best_pct = bpp_nrfi
+    if best_pct is None:
+        for book in SPORTSBOOKS:
+            if book in books:
+                best_pct = books[book]["nrfi_pct"]
+                break
+    best_pct = best_pct or 0
+    color = 0x22c55e if best_pct >= 55 else 0xf59e0b if best_pct >= 45 else 0xef4444
 
     fields = []
-    if bpp_pct is not None:
-        odds_str = f"  (fair: {bpp_odds:+d})" if bpp_odds else ""
-        fields.append({"name": "📊 BallparkPal (sim)",  "value": f"**{bpp_pct}%**{odds_str}", "inline": True})
-    if pin_pct is not None:
-        fields.append({"name": "📈 Pinnacle (market)", "value": f"**{pin_pct}%**  ({over_odds:+d} / {under_odds:+d})", "inline": True})
-    if bpp_pct and pin_pct:
-        edge = round(bpp_pct - pin_pct, 1)
-        if abs(edge) >= 3:
-            sign = "+" if edge > 0 else ""
-            fields.append({"name": "⚡ Edge", "value": f"{sign}{edge}% vs market", "inline": True})
+
+    # BallparkPal sim
+    if bpp_nrfi is not None:
+        fields.append({"name": "📊 BPP Sim", "value": f"**{bpp_nrfi}%** NRFI", "inline": True})
+
+    # All books side by side
+    book_lines = []
+    for book in SPORTSBOOKS:
+        if book in books:
+            b = books[book]
+            label = BOOK_LABELS.get(book, book.upper())
+            book_lines.append(f"**{label}**: {b['nrfi_pct']}% ({b['under']:+d}/{b['over']:+d})")
+    if book_lines:
+        fields.append({"name": "📈 Books (NRFI%)", "value": "\n".join(book_lines), "inline": False})
+
+    # Edge: BPP vs sharpest book
+    if bpp_nrfi and books:
+        sharp_pct = None
+        for book in SPORTSBOOKS:
+            if book in books:
+                sharp_pct = books[book]["nrfi_pct"]
+                break
+        if sharp_pct:
+            edge = round(bpp_nrfi - sharp_pct, 1)
+            if abs(edge) >= 3:
+                sign = "+" if edge > 0 else ""
+                fields.append({"name": "⚡ Edge (sim vs market)", "value": f"{sign}{edge}%", "inline": True})
+
     if away_win and home_win:
         fields.append({"name": "🏆 Win %", "value": f"{away} {away_win}% / {home} {home_win}%", "inline": False})
     if away_pitcher or home_pitcher:
         fields.append({"name": "⚾ Starters", "value": f"{away_pitcher or '?'} vs {home_pitcher or '?'}", "inline": False})
 
+    books_used = ", ".join(BOOK_LABELS.get(b, b) for b in SPORTSBOOKS if b in books)
     embed = {
         "embeds": [{
             "title": f"{title_prefix}: {away} @ {home}",
             "fields": fields,
             "color": color,
-            "footer": {"text": "BallparkPal sim + OddsBlaze Pinnacle"},
+            "footer": {"text": f"BPP sim + OddsBlaze ({books_used or 'no books'})"},
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }]
     }
@@ -272,17 +341,20 @@ def send_game_alert(away, home, pin_pct, over_odds, under_odds,
 
 
 # ── Discord: morning summary ──────────────────────────────────────────────────
-def send_morning_summary(odds_games: list[dict], bpp_games: list[dict]):
-    """Send one Discord message summarising all of today's games."""
-    if not odds_games:
+def send_morning_summary(all_games: dict, bpp_games: list[dict]):
+    """Send one Discord message summarising all of today's NRFI numbers."""
+    if not all_games:
         return
 
+    # Sort by start time
+    sorted_games = sorted(all_games.values(), key=lambda x: x["start"])
+
     lines = []
-    for g in sorted(odds_games, key=lambda x: x["start"]):
+    for g in sorted_games:
         et_min = utc_to_et_minutes(g["start"])
         time_str = f"{et_min//60}:{et_min%60:02d} ET" if et_min else "TBD"
 
-        # Match BPP
+        # Match BPP by team name
         bpp = None
         for b in bpp_games:
             a_last = g["away"].split()[-1].lower()
@@ -290,17 +362,27 @@ def send_morning_summary(odds_games: list[dict], bpp_games: list[dict]):
                 bpp = b
                 break
 
-        bpp_str = f"  BPP: {bpp['yrfi_pct']}%" if bpp and bpp.get("yrfi_pct") else ""
-        pin_str = f"  PIN: {g['yrfi_pct']}% ({g['over_odds']:+d}/{g['under_odds']:+d})"
-        lines.append(f"**{g['away']} @ {g['home']}** — {time_str}\n{pin_str}{bpp_str}")
+        # Build book line: "PIN 54.2% | FD 53.8% | CZR 55.0%"
+        book_parts = []
+        for book in SPORTSBOOKS:
+            if book in g["books"]:
+                label = BOOK_LABELS.get(book, book.upper())
+                pct = g["books"][book]["nrfi_pct"]
+                under = g["books"][book]["under"]
+                book_parts.append(f"{label} {pct}% ({under:+d})")
+
+        bpp_str = f"  BPP: {bpp['nrfi_pct']}%" if bpp and bpp.get("nrfi_pct") else ""
+        books_str = "  " + " | ".join(book_parts) if book_parts else "  No odds"
+
+        lines.append(f"**{g['away']} @ {g['home']}** — {time_str}\n{books_str}{bpp_str}")
 
     description = "\n\n".join(lines)
     embed = {
         "embeds": [{
-            "title": f"⚾ Today's YRFI Slate — {today_et()}",
+            "title": f"🛡️ Today's NRFI Slate — {today_et()}",
             "description": description,
             "color": 0x3b82f6,
-            "footer": {"text": "BallparkPal sim + OddsBlaze Pinnacle"},
+            "footer": {"text": "BPP sim + OddsBlaze (multi-book)"},
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }]
     }
@@ -337,35 +419,27 @@ def run():
     today   = today_et()
     is_morning = 8 * 60 <= now_min < 8 * 60 + 30   # 8:00–8:29 ET
 
-    print(f"\n[{datetime.now(timezone.utc).isoformat()}] YRFI Bot")
+    print(f"\n[{datetime.now(timezone.utc).isoformat()}] NRFI Bot (multi-book)")
     print(f"  ET: {now_min//60}:{now_min%60:02d}  |  Morning mode: {is_morning}")
 
-    # 1. Always fetch + upsert OddsBlaze
-    print("\n→ Fetching OddsBlaze...")
+    # 1. Fetch all sportsbooks
+    print("\n→ Fetching OddsBlaze (all books)...")
     try:
-        odds_games = fetch_oddsblaze()
-        print(f"  {len(odds_games)} games")
-        if odds_games:
-            rows = [{
-                "game_id": g["game_id"], "away": g["away"], "home": g["home"],
-                "start_time": g["start"], "yrfi_pct": g["yrfi_pct"],
-                "over_odds": g["over_odds"], "under_odds": g["under_odds"],
-                "fetched_at": datetime.now(timezone.utc).isoformat(),
-            } for g in odds_games]
-            supabase.table("yrfi_odds").upsert(rows, on_conflict="game_id").execute()
+        all_games = fetch_all_books()
+        print(f"  {len(all_games)} unique games across all books")
     except Exception as e:
         print(f"  OddsBlaze error: {e}")
-        odds_games = []
+        all_games = {}
 
     # Filter to only TODAY's games in ET
-    odds_games = [g for g in odds_games if utc_to_et_date(g["start"]) == today]
-    print(f"  {len(odds_games)} games on {today} ET")
+    all_games = {k: g for k, g in all_games.items() if utc_to_et_date(g["start"]) == today}
+    print(f"  {len(all_games)} games on {today} ET")
 
-    if not odds_games:
+    if not all_games:
         print("  No games today. Done.")
         return
 
-    # 2. Scrape BallparkPal (always needed for both modes)
+    # 2. Scrape BallparkPal
     print("\n→ Scraping BallparkPal...")
     try:
         bpp_games = scrape_ballparkpal(today)
@@ -378,7 +452,7 @@ def run():
         if morning_summary_sent_today():
             print("  Morning summary already sent today.")
         else:
-            send_morning_summary(odds_games, bpp_games)
+            send_morning_summary(all_games, bpp_games)
             mark_morning_summary_sent()
         return
 
@@ -388,7 +462,7 @@ def run():
     print(f"\n→ Checking pre-game window: {win_lo//60}:{win_lo%60:02d}–{win_hi//60}:{win_hi%60:02d} ET")
 
     games_in_window = [
-        g for g in odds_games
+        g for g in all_games.values()
         if (et_min := utc_to_et_minutes(g["start"])) is not None
         and win_lo <= et_min <= win_hi
     ]
@@ -409,11 +483,8 @@ def run():
         send_game_alert(
             away         = g["away"],
             home         = g["home"],
-            pin_pct      = g["yrfi_pct"],
-            over_odds    = g["over_odds"],
-            under_odds   = g["under_odds"],
-            bpp_pct      = bpp["yrfi_pct"] if bpp else None,
-            bpp_odds     = bpp["yrfi_odds"] if bpp else None,
+            books        = g["books"],
+            bpp_nrfi     = bpp["nrfi_pct"] if bpp else None,
             away_win     = bpp["away_win_pct"] if bpp else None,
             home_win     = bpp["home_win_pct"] if bpp else None,
             away_pitcher = bpp["away_pitcher"] if bpp else None,
