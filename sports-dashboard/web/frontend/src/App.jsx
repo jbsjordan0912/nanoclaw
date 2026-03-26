@@ -757,52 +757,19 @@ function WPDashboard() {
     }
   }, [])
 
-  // REST poll Kalshi price every 15s as backup (WS only pushes on trades)
-  const kalshiPollRef = useRef(null)
-  const kalshiTeamsRef = useRef(null)
-  const pollKalshiRest = useCallback(async () => {
-    const teams = kalshiTeamsRef.current
-    if (!teams) return
-    try {
-      const kr = await fetch(`${API}/api/kalshi/price?home_team=${encodeURIComponent(teams.home)}&away_team=${encodeURIComponent(teams.away)}`)
-      const kd = await kr.json()
-      if (kd.price != null) {
-        kalshiOverrideRef.current = kd.price
-        setKalshiInput(String(Math.round(kd.price * 100)))
-        setKalshiLive(true)
-        // Don't call calculate() here — stale closure over state.
-        // The useEffect on [state] handles recalculation with fresh state.
-      }
-    } catch {}
-  }, [])
-
-  // Open/close Kalshi WS + REST poll based on mode + selected game
+  // Pure WS — seed once from REST on connect, then WS handles all updates
   useEffect(() => {
-    if (kalshiPollRef.current) clearInterval(kalshiPollRef.current)
     if (mode === 'auto' && selectedGame) {
       connectKalshiWs(selectedGame)
-      // Start REST poll after initial WS seed (delayed 5s to not double-fetch)
-      const startPoll = async () => {
-        try {
-          const gr = await fetch(`${API}/api/games/${selectedGame}/state`)
-          if (!gr.ok) return
-          const g = await gr.json()
-          kalshiTeamsRef.current = { home: g.home_team, away: g.away_team }
-          kalshiPollRef.current = setInterval(pollKalshiRest, 15000)
-        } catch {}
-      }
-      setTimeout(startPoll, 5000)
     } else {
       if (kalshiWsRef.current) { kalshiWsRef.current.close(); kalshiWsRef.current = null }
       kalshiOverrideRef.current = null
-      kalshiTeamsRef.current = null
       setKalshiLive(false)
     }
     return () => {
       if (kalshiWsRef.current) { kalshiWsRef.current.close(); kalshiWsRef.current = null }
-      if (kalshiPollRef.current) clearInterval(kalshiPollRef.current)
     }
-  }, [mode, selectedGame, connectKalshiWs, pollKalshiRest])
+  }, [mode, selectedGame, connectKalshiWs])
 
   const calculate = async (kalshiOverride = null) => {
     setLoading(true); setError(null)
