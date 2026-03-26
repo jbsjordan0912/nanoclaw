@@ -742,8 +742,11 @@ function WPDashboard() {
             })
             .catch(() => {})
         } else if (data.type === 'price') {
-          kalshiOverrideRef.current = data.yes_bid
-          setKalshiInput(String(Math.round(data.yes_bid * 100)))
+          const wsMid = (data.yes_bid > 0 && data.yes_ask > 0)
+            ? (data.yes_bid + data.yes_ask) / 2
+            : data.last_price || data.yes_bid
+          kalshiOverrideRef.current = wsMid
+          setKalshiInput(String(Math.round(wsMid * 100)))
           setKalshiLive(true)
         } else if (data.error) {
           console.warn('Kalshi WS error:', data.error)

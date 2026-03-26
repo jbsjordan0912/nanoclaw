@@ -614,15 +614,17 @@ async def kalshi_ws_proxy(websocket: WebSocket, ticker: str = ""):
                         await websocket.send_json({"status": "connected", "ticker": ticker})
                     elif t == "ticker":
                         d  = data.get("msg", {})
-                        yb = d.get("yes_bid")
-                        ya = d.get("yes_ask")
-                        lp = d.get("last_price")
-                        if yb is not None:
+                        yb = _parse_dollars(d.get("yes_bid_dollars"))
+                        ya = _parse_dollars(d.get("yes_ask_dollars"))
+                        lp = _parse_dollars(d.get("price_dollars"))
+                        vol = d.get("volume_fp")
+                        if yb > 0 or ya > 0 or lp > 0:
                             await websocket.send_json({
                                 "type":        "price",
-                                "yes_bid":     yb / 100,
-                                "yes_ask":     ya / 100 if ya is not None else None,
-                                "last_price":  lp / 100 if lp is not None else None,
+                                "yes_bid":     yb,
+                                "yes_ask":     ya,
+                                "last_price":  lp,
+                                "volume":      int(float(vol)) if vol else None,
                             })
         except Exception as e:
             try:
