@@ -223,31 +223,53 @@ MLB_API = "https://statsapi.mlb.com/api/v1"
 
 @app.get("/api/games/today")
 async def games_today():
-    """Return today's MLB games with status, teams, score."""
+    """Return today's MLB games (ET date, not UTC — catches late-night games)."""
     import httpx
-    from datetime import datetime, timezone
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        r = await client.get(f"{MLB_API}/schedule", params={
-            "sportId": 1, "date": today, "hydrate": "linescore"
-        })
+    from datetime import datetime, timezone, timedelta
+    # Use ET date so 8:30 PM ET games on the 26th aren't missed
+    now_utc = datetime.now(timezone.utc)
+    et_now = now_utc - timedelta(hours=4)
+    today_et = et_now.strftime("%Y-%m-%d")
+    tomorrow_utc = (now_utc + timedelta(days=1)).strftime("%Y-%m-%d")
+
+    seen = set()
     games = []
-    for g in r.json().get("dates", [{}])[0].get("games", []):
-        ls = g.get("linescore", {})
-        status = g["status"]["abstractGameState"]  # Live / Final / Preview
-        games.append({
-            "game_pk":    g["gamePk"],
-            "status":     status,
-            "away_team":  g["teams"]["away"]["team"]["name"],
-            "home_team":  g["teams"]["home"]["team"]["name"],
-            "away_id":    g["teams"]["away"]["team"]["id"],
-            "home_id":    g["teams"]["home"]["team"]["id"],
-            "away_score": g["teams"]["away"].get("score"),
-            "home_score": g["teams"]["home"].get("score"),
-            "inning":     ls.get("currentInning"),
-            "inning_half": ls.get("inningHalf"),
-            "game_time":  g.get("gameDate"),
-        })
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        # Fetch both today (ET) and tomorrow (UTC) to catch late-night games
+        for date in (today_et, tomorrow_utc):
+            r = await client.get(f"{MLB_API}/schedule", params={
+                "sportId": 1, "date": date, "hydrate": "linescore"
+            })
+            for d in r.json().get("dates", []):
+                for g in d.get("games", []):
+                    if g["gamePk"] in seen:
+                        continue
+                    seen.add(g["gamePk"])
+                    # Only include games that fall on today's ET date
+                    game_time = g.get("gameDate", "")
+                    if game_time:
+                        try:
+                            gt = datetime.fromisoformat(game_time.replace("Z", "+00:00"))
+                            game_et = gt - timedelta(hours=4)
+                            if game_et.strftime("%Y-%m-%d") != today_et:
+                                continue
+                        except Exception:
+                            pass
+                    ls = g.get("linescore", {})
+                    status = g["status"]["abstractGameState"]
+                    games.append({
+                        "game_pk":    g["gamePk"],
+                        "status":     status,
+                        "away_team":  g["teams"]["away"]["team"]["name"],
+                        "home_team":  g["teams"]["home"]["team"]["name"],
+                        "away_id":    g["teams"]["away"]["team"]["id"],
+                        "home_id":    g["teams"]["home"]["team"]["id"],
+                        "away_score": g["teams"]["away"].get("score"),
+                        "home_score": g["teams"]["home"].get("score"),
+                        "inning":     ls.get("currentInning"),
+                        "inning_half": ls.get("inningHalf"),
+                        "game_time":  game_time,
+                    })
     return games
 
 
