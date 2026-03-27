@@ -1374,6 +1374,33 @@ function PlakataTab() {
   const wsRef = useRef(null)
   const pollRef = useRef(null)
 
+  // Trading auth
+  const [tradeUnlocked, setTradeUnlocked] = useState(false)
+  const [tradeToken, setTradeToken] = useState('')
+  const [pinInput, setPinInput] = useState('')
+  const [pinError, setPinError] = useState('')
+  const [showPinModal, setShowPinModal] = useState(false)
+
+  const unlockTrading = async () => {
+    setPinError('')
+    try {
+      const r = await fetch(`${API}/api/auth/trade`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: pinInput }),
+      })
+      const d = await r.json()
+      if (d.ok) {
+        setTradeToken(d.token)
+        setTradeUnlocked(true)
+        setShowPinModal(false)
+        setPinInput('')
+      } else {
+        setPinError(d.error || 'Wrong password')
+      }
+    } catch { setPinError('Connection error') }
+  }
+
   // Load today's games
   useEffect(() => {
     fetch(`${API}/api/games/today`).then(r => r.json()).then(setGames).catch(() => {})
@@ -1492,11 +1519,57 @@ function PlakataTab() {
 
   return (
     <div style={{ animation: 'fadeIn 0.3s ease' }}>
+      {/* PIN modal */}
+      {showPinModal && (
+        <div style={{
+          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', zIndex: 100,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+        }} onClick={() => setShowPinModal(false)}>
+          <div style={{
+            background: '#1e293b', borderRadius: 16, padding: 24, width: 280,
+            border: '1px solid #334155',
+          }} onClick={e => e.stopPropagation()}>
+            <div style={{ fontSize: 15, fontWeight: 700, color: '#e2e8f0', marginBottom: 16, textAlign: 'center' }}>
+              Unlock Trading
+            </div>
+            <input
+              value={pinInput}
+              onChange={e => setPinInput(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && unlockTrading()}
+              placeholder="Enter password"
+              type="password"
+              autoFocus
+              style={{
+                width: '100%', padding: '10px 12px', borderRadius: 8,
+                background: '#0f172a', border: `1px solid ${pinError ? '#ef4444' : '#334155'}`,
+                color: '#f1f5f9', fontSize: 15, outline: 'none', boxSizing: 'border-box',
+                marginBottom: 8,
+              }}
+            />
+            {pinError && <div style={{ fontSize: 12, color: '#ef4444', marginBottom: 8 }}>{pinError}</div>}
+            <button
+              onClick={unlockTrading}
+              style={{
+                width: '100%', padding: '10px 0', borderRadius: 8, border: 'none',
+                background: '#2563eb', color: '#fff', fontSize: 14, fontWeight: 700,
+                cursor: 'pointer',
+              }}
+            >Unlock</button>
+          </div>
+        </div>
+      )}
+
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
         <div style={{ fontSize: 13, fontWeight: 700, color: '#94a3b8' }}>
           PLAKATA
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          {tradeUnlocked
+            ? <span style={{ fontSize: 10, color: '#f59e0b', fontWeight: 700, cursor: 'pointer' }}
+                onClick={() => { setTradeUnlocked(false); setTradeToken('') }}>TRADING ●</span>
+            : <span style={{ fontSize: 10, color: '#475569', fontWeight: 600, cursor: 'pointer' }}
+                onClick={() => setShowPinModal(true)}>VIEW ONLY</span>
+          }
           {wsConnected && <span style={{ fontSize: 10, color: '#22c55e', fontWeight: 700 }}>● LIVE</span>}
           {gameState?.status === 'Live' && (
             <span style={{ fontSize: 10, color: '#475569' }}>

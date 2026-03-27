@@ -594,6 +594,34 @@ async def kalshi_prices_all():
 
 
 # ---------------------------------------------------------------------------
+# Trading auth
+# ---------------------------------------------------------------------------
+
+TRADE_PASSWORD = os.environ.get("PLAKATA_PASSWORD", "")
+
+@app.post("/api/auth/trade")
+async def auth_trade(body: dict):
+    """Verify trading password. Returns token if correct."""
+    if not TRADE_PASSWORD:
+        return {"ok": False, "error": "Trading not configured"}
+    if body.get("password") == TRADE_PASSWORD:
+        # Simple token — hash of password + date so it changes daily
+        import hashlib
+        token = hashlib.sha256(f"{TRADE_PASSWORD}:{datetime.now(timezone.utc).strftime('%Y-%m-%d')}".encode()).hexdigest()[:32]
+        return {"ok": True, "token": token}
+    return {"ok": False, "error": "Wrong password"}
+
+
+def _verify_trade_token(token: str) -> bool:
+    """Verify a trading token."""
+    if not TRADE_PASSWORD or not token:
+        return False
+    import hashlib
+    expected = hashlib.sha256(f"{TRADE_PASSWORD}:{datetime.now(timezone.utc).strftime('%Y-%m-%d')}".encode()).hexdigest()[:32]
+    return token == expected
+
+
+# ---------------------------------------------------------------------------
 # Kalshi orderbook
 # ---------------------------------------------------------------------------
 
