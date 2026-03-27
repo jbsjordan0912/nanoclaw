@@ -730,8 +730,8 @@ async def trade_preview(req: SweepPreviewRequest):
                 "total_contracts": total_contracts,
                 "total_cost_cents": total_cost,
                 "total_cost_dollars": round(total_cost / 100, 2),
-                "max_payout_dollars": round(total_contracts / 100, 2),
-                "potential_profit_dollars": round((total_contracts - total_cost) / 100, 2),
+                "max_payout_dollars": round(total_contracts, 2),
+                "potential_profit_dollars": round(total_contracts - total_cost / 100, 2),
             }
     except Exception as e:
         return {"error": str(e)}
