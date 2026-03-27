@@ -1081,15 +1081,15 @@ function WPDashboard() {
           </div>
         </div>
       )}
-        {edge != null && (
-          <div style={{ textAlign: 'center', minWidth: 80 }}>
-            <div style={{ fontSize: 11, color: '#94a3b8', textTransform: 'uppercase', marginBottom: 4 }}>Edge</div>
-            <div style={{ fontSize: 22, fontWeight: 800, color: edgeColor }}>
-              {edge > 0 ? '+' : ''}{(edge * 100).toFixed(1)}%
-            </div>
+
+      {edge != null && (
+        <div style={{ textAlign: 'center', marginBottom: 16 }}>
+          <div style={{ fontSize: 11, color: '#94a3b8', textTransform: 'uppercase', marginBottom: 4 }}>Edge</div>
+          <div style={{ fontSize: 22, fontWeight: 800, color: edgeColor }}>
+            {edge > 0 ? '+' : ''}{(edge * 100).toFixed(1)}%
           </div>
-        )}
-      </div>
+        </div>
+      )}
 
       {error && <div style={{ color: '#ef4444', fontSize: 14, textAlign: 'center', marginBottom: 16 }}>{error}</div>}
 
