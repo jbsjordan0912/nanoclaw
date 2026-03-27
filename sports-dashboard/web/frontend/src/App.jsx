@@ -1223,13 +1223,144 @@ function TeamOrderbook({ team, abbr, ticker, wsData }) {
   )
 }
 
+// ── Scorebug ─────────────────────────────────────────────────────────────────
+function Scorebug({ gameState, awayAsk, homeAsk }) {
+  if (!gameState) return null
+  const g = gameState
+  const isTop = g.topbot === 'Top'
+  const bases = [g.on_1b, g.on_2b, g.on_3b]
+
+  return (
+    <div style={{ background: '#1e293b', borderRadius: 12, padding: 14, marginBottom: 12, border: '1px solid #334155' }}>
+      {/* Teams + score + Kalshi ask */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 10 }}>
+        {[
+          { label: g.away_team, score: isTop ? g.bat_score : g.fld_score, batting: isTop, ask: awayAsk },
+          { label: g.home_team, score: isTop ? g.fld_score : g.bat_score, batting: !isTop, ask: homeAsk },
+        ].map((t, i) => (
+          <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            {t.batting && <span style={{ fontSize: 8, color: '#f59e0b' }}>▶</span>}
+            {!t.batting && <span style={{ fontSize: 8, color: 'transparent' }}>▶</span>}
+            <span style={{ flex: 1, fontSize: 14, fontWeight: t.batting ? 800 : 400, color: t.batting ? '#f1f5f9' : '#94a3b8' }}>
+              {t.label}
+            </span>
+            <span style={{ fontSize: 18, fontWeight: 800, color: '#f1f5f9', minWidth: 24, textAlign: 'right' }}>
+              {t.score}
+            </span>
+            <span style={{
+              fontSize: 13, fontWeight: 700, color: '#ef4444',
+              minWidth: 40, textAlign: 'right',
+              opacity: t.ask != null ? 1 : 0.3,
+            }}>
+              {t.ask != null ? `${t.ask}¢` : '—'}
+            </span>
+          </div>
+        ))}
+      </div>
+
+      {/* Inning + count + outs + bases */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        {/* Inning */}
+        <div style={{ textAlign: 'center' }}>
+          <div style={{ fontSize: 9, color: '#475569' }}>{isTop ? '▲' : '▼'}</div>
+          <div style={{ fontSize: 16, fontWeight: 800, color: '#e2e8f0' }}>{g.inning || 1}</div>
+        </div>
+
+        {/* Count */}
+        <div style={{ display: 'flex', gap: 12 }}>
+          <div style={{ textAlign: 'center' }}>
+            <div style={{ fontSize: 9, color: '#475569' }}>B</div>
+            <div style={{ fontSize: 14, fontWeight: 700, color: '#22c55e' }}>{g.balls || 0}</div>
+          </div>
+          <div style={{ textAlign: 'center' }}>
+            <div style={{ fontSize: 9, color: '#475569' }}>S</div>
+            <div style={{ fontSize: 14, fontWeight: 700, color: '#ef4444' }}>{g.strikes || 0}</div>
+          </div>
+          <div style={{ textAlign: 'center' }}>
+            <div style={{ fontSize: 9, color: '#475569' }}>O</div>
+            <div style={{ fontSize: 14, fontWeight: 700, color: '#f59e0b' }}>{g.outs || 0}</div>
+          </div>
+        </div>
+
+        {/* Bases diamond */}
+        <svg width="40" height="40" viewBox="0 0 40 40">
+          <rect x="15" y="2" width="12" height="12" rx="1" transform="rotate(45 21 8)"
+            fill={bases[1] ? '#f59e0b' : 'none'} stroke={bases[1] ? '#f59e0b' : '#334155'} strokeWidth="1.5" />
+          <rect x="24" y="11" width="12" height="12" rx="1" transform="rotate(45 30 17)"
+            fill={bases[0] ? '#f59e0b' : 'none'} stroke={bases[0] ? '#f59e0b' : '#334155'} strokeWidth="1.5" />
+          <rect x="6" y="11" width="12" height="12" rx="1" transform="rotate(45 12 17)"
+            fill={bases[2] ? '#f59e0b' : 'none'} stroke={bases[2] ? '#f59e0b' : '#334155'} strokeWidth="1.5" />
+        </svg>
+
+        {/* Batter/Pitcher */}
+        <div style={{ textAlign: 'right', maxWidth: 100 }}>
+          {g.batter?.name && (
+            <div style={{ fontSize: 11, color: '#e2e8f0', fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+              {g.batter.name.split(' ').pop()}
+            </div>
+          )}
+          {g.pitcher_name && (
+            <div style={{ fontSize: 10, color: '#475569', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+              vs {g.pitcher_name.split(' ').pop()}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── WPA Outcome Table (anchored to Kalshi price) ─────────────────────────────
+function WPATable({ wpData, battingTeam }) {
+  if (!wpData?.outcomes) return null
+
+  return (
+    <div style={{ background: '#1e293b', borderRadius: 12, padding: 14, marginBottom: 12, border: '1px solid #334155' }}>
+      <div style={{ fontSize: 11, color: '#94a3b8', fontWeight: 700, textTransform: 'uppercase', marginBottom: 8, letterSpacing: '0.05em' }}>
+        If {battingTeam || 'batter'}...
+      </div>
+      {wpData.outcomes.map((o, i) => {
+        const shift = o.wpa
+        const shiftPct = (shift * 100).toFixed(1)
+        const isPositive = shift > 0
+        const isBig = Math.abs(shift) >= 0.05
+        const color = isPositive ? '#22c55e' : '#ef4444'
+
+        return (
+          <div key={i} style={{
+            display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+            padding: '6px 8px', borderRadius: 6, marginBottom: 2,
+            background: isBig ? `${color}10` : 'transparent',
+            border: isBig ? `1px solid ${color}22` : '1px solid transparent',
+          }}>
+            <span style={{ fontSize: 13, color: '#e2e8f0', fontWeight: isBig ? 700 : 400 }}>
+              {o.label}
+            </span>
+            <div style={{ textAlign: 'right' }}>
+              <span style={{ fontSize: 14, fontWeight: 700, color }}>
+                {isPositive ? '+' : ''}{shiftPct}%
+              </span>
+              <span style={{ fontSize: 11, color: '#475569', marginLeft: 6 }}>
+                → {(o.new_wp * 100).toFixed(0)}¢
+              </span>
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 function PlakataTab() {
   const [games, setGames] = useState([])
   const [selectedGame, setSelectedGame] = useState(null)
-  const [gameData, setGameData] = useState(null) // { home: {ticker, abbr}, away: {ticker, abbr} }
+  const [gameData, setGameData] = useState(null)
+  const [gameState, setGameState] = useState(null)
   const [wsConnected, setWsConnected] = useState(false)
-  const [wsPrices, setWsPrices] = useState({}) // { "LAD": {bid, ask, last}, "AZ": {bid, ask, last} }
+  const [wsPrices, setWsPrices] = useState({})
+  const [wpData, setWpData] = useState(null)
   const wsRef = useRef(null)
+  const pollRef = useRef(null)
 
   // Load today's games
   useEffect(() => {
@@ -1238,16 +1369,70 @@ function PlakataTab() {
 
   // When game selected, find both tickers
   useEffect(() => {
-    if (!selectedGame) { setGameData(null); return }
+    if (!selectedGame) { setGameData(null); setGameState(null); setWpData(null); return }
     const g = games.find(g => g.game_pk === selectedGame)
     if (!g) return
     fetch(`${API}/api/kalshi/game-tickers?home_team=${encodeURIComponent(g.home_team)}&away_team=${encodeURIComponent(g.away_team)}`)
       .then(r => r.json())
-      .then(d => {
-        if (!d.error) setGameData(d)
-      })
+      .then(d => { if (!d.error) setGameData(d) })
       .catch(() => {})
   }, [selectedGame, games])
+
+  // Poll game state every 10s
+  const syncGame = useCallback(async (gamePk) => {
+    try {
+      const r = await fetch(`${API}/api/games/${gamePk}/state`)
+      if (!r.ok) return
+      const g = await r.json()
+      setGameState(g)
+    } catch {}
+  }, [])
+
+  useEffect(() => {
+    if (pollRef.current) clearInterval(pollRef.current)
+    if (selectedGame) {
+      syncGame(selectedGame)
+      pollRef.current = setInterval(() => syncGame(selectedGame), 10000)
+    }
+    return () => { if (pollRef.current) clearInterval(pollRef.current) }
+  }, [selectedGame, syncGame])
+
+  // Calculate WPA when game state changes (anchored to Kalshi price)
+  useEffect(() => {
+    if (!gameState || gameState.status !== 'Live') { setWpData(null); return }
+
+    const isTop = gameState.topbot === 'Top'
+    // Get batting team's Kalshi ask as current WP
+    const homeAbbr = gameData?.home?.abbr
+    const awayAbbr = gameData?.away?.abbr
+    const battingAbbr = isTop ? awayAbbr : homeAbbr
+    const battingWs = wsPrices[battingAbbr]
+    const kalshiPrice = battingWs?.ask > 0 ? battingWs.ask : null
+
+    const body = {
+      inning: gameState.inning || 1,
+      topbot: gameState.topbot || 'Top',
+      outs: gameState.outs || 0,
+      on_1b: gameState.on_1b || false,
+      on_2b: gameState.on_2b || false,
+      on_3b: gameState.on_3b || false,
+      bat_score: gameState.bat_score || 0,
+      fld_score: gameState.fld_score || 0,
+      season: 2025,
+      batting_lineup: gameState.batting_lineup?.map(p => p.id) || null,
+      fielding_pitcher: gameState.pitcher_id || null,
+      kalshi_price: kalshiPrice,
+    }
+
+    fetch(`${API}/api/wp`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+      .then(r => r.json())
+      .then(setWpData)
+      .catch(() => {})
+  }, [gameState, wsPrices, gameData])
 
   // Connect WS when we have game data
   useEffect(() => {
@@ -1276,15 +1461,30 @@ function PlakataTab() {
     return () => { ws.close() }
   }, [gameData])
 
+  // Derive ask prices for scorebug
+  const homeAsk = wsPrices[gameData?.home?.abbr]?.ask > 0
+    ? Math.round(wsPrices[gameData.home.abbr].ask * 100) : null
+  const awayAsk = wsPrices[gameData?.away?.abbr]?.ask > 0
+    ? Math.round(wsPrices[gameData.away.abbr].ask * 100) : null
+
+  const battingTeam = gameState
+    ? (gameState.topbot === 'Top' ? gameState.away_team : gameState.home_team)?.split(' ').pop()
+    : null
+
   return (
     <div style={{ animation: 'fadeIn 0.3s ease' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
         <div style={{ fontSize: 13, fontWeight: 700, color: '#94a3b8' }}>
           PLAKATA
         </div>
-        {wsConnected && (
-          <span style={{ fontSize: 10, color: '#22c55e', fontWeight: 700 }}>● LIVE</span>
-        )}
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          {wsConnected && <span style={{ fontSize: 10, color: '#22c55e', fontWeight: 700 }}>● LIVE</span>}
+          {gameState?.status === 'Live' && (
+            <span style={{ fontSize: 10, color: '#475569' }}>
+              {gameState.topbot === 'Top' ? '▲' : '▼'}{gameState.inning}
+            </span>
+          )}
+        </div>
       </div>
 
       {/* Game picker */}
@@ -1294,7 +1494,7 @@ function PlakataTab() {
         style={{
           width: '100%', padding: '10px 12px', borderRadius: 8,
           background: '#1e293b', border: '1px solid #334155',
-          color: '#f1f5f9', fontSize: 14, marginBottom: 16, outline: 'none',
+          color: '#f1f5f9', fontSize: 14, marginBottom: 12, outline: 'none',
         }}
       >
         <option value="">Select a game...</option>
@@ -1306,7 +1506,13 @@ function PlakataTab() {
         ))}
       </select>
 
-      {/* Away team */}
+      {/* Scorebug */}
+      <Scorebug gameState={gameState} awayAsk={awayAsk} homeAsk={homeAsk} />
+
+      {/* WPA Outcome Table */}
+      <WPATable wpData={wpData} battingTeam={battingTeam} />
+
+      {/* Orderbooks */}
       {gameData?.away && (
         <TeamOrderbook
           team={games.find(g => g.game_pk === selectedGame)?.away_team || ''}
@@ -1315,8 +1521,6 @@ function PlakataTab() {
           wsData={wsPrices[gameData.away.abbr]}
         />
       )}
-
-      {/* Home team */}
       {gameData?.home && (
         <TeamOrderbook
           team={games.find(g => g.game_pk === selectedGame)?.home_team || ''}
@@ -1334,13 +1538,9 @@ function PlakataTab() {
 
       {!selectedGame && (
         <div style={{ fontSize: 13, color: '#475569', textAlign: 'center', padding: 40 }}>
-          Select a game to view live orderbook
+          Select a game to view live trading data
         </div>
       )}
-
-      <div style={{ fontSize: 11, color: '#334155', textAlign: 'center', paddingTop: 8 }}>
-        Orderbook refreshes every 10s · Top-of-book via WebSocket
-      </div>
     </div>
   )
 }
