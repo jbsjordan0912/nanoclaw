@@ -21,7 +21,8 @@ from playwright.sync_api import sync_playwright
 ODDS_KEY        = os.environ["ODDSBLAZE_KEY"]
 SUPABASE_URL    = os.environ["SUPABASE_URL"]
 SUPABASE_KEY    = os.environ["SUPABASE_KEY"]
-DISCORD_WEBHOOK = os.environ["DISCORD_WEBHOOK"]
+DISCORD_WEBHOOK   = os.environ["DISCORD_WEBHOOK"]
+DISCORD_WEBHOOK_2 = os.environ.get("DISCORD_WEBHOOK_2", "")
 BPP_EMAIL       = os.environ["BPP_EMAIL"]
 BPP_PASSWORD    = os.environ["BPP_PASSWORD"]
 
@@ -391,6 +392,81 @@ def send_morning_summary(all_games: dict, bpp_games: list[dict]):
     print("  ✓ Morning summary sent")
 
 
+# ── Degen Discord (webhook 2) ─────────────────────────────────────────────────
+def _degen_color(nrfi_pct):
+    if nrfi_pct is None: return 0x6b7280
+    if nrfi_pct >= 55: return 0x22c55e
+    if nrfi_pct >= 45: return 0xf59e0b
+    return 0xef4444
+
+
+def send_degen_game_alert(away, home, books, bpp_nrfi=None,
+                          away_pitcher=None, home_pitcher=None):
+    if not DISCORD_WEBHOOK_2:
+        return
+
+    color = _degen_color(bpp_nrfi)
+    nrfi_str = f"**{bpp_nrfi}%**" if bpp_nrfi is not None else "—"
+
+    odds_parts = []
+    for book in SPORTSBOOKS:
+        if book in books:
+            label = BOOK_LABELS.get(book, book.upper())
+            under = books[book]["under"]
+            odds_parts.append(f"{label} {under:+d}")
+    odds_str = " | ".join(odds_parts) if odds_parts else "No odds yet"
+
+    starters = ""
+    if away_pitcher or home_pitcher:
+        starters = f"\n⚾ {away_pitcher or '?'} vs {home_pitcher or '?'}"
+
+    embed = {
+        "embeds": [{
+            "title": f"🔒 {away} @ {home}",
+            "description": f"NRFI: {nrfi_str}\n{odds_str}{starters}",
+            "color": color,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }]
+    }
+    r = requests.post(DISCORD_WEBHOOK_2, json=embed, timeout=10)
+    r.raise_for_status()
+
+
+def send_degen_morning_summary(all_games: dict):
+    if not DISCORD_WEBHOOK_2 or not all_games:
+        return
+
+    sorted_games = sorted(all_games.values(), key=lambda x: x["start"])
+    lines = []
+
+    for g in sorted_games:
+        et_min = utc_to_et_minutes(g["start"])
+        time_str = f"{et_min//60}:{et_min%60:02d}" if et_min else "TBD"
+
+        odds_parts = []
+        for book in SPORTSBOOKS:
+            if book in g["books"]:
+                label = BOOK_LABELS.get(book, book.upper())
+                under = g["books"][book]["under"]
+                odds_parts.append(f"{label} {under:+d}")
+        odds_str = " | ".join(odds_parts) if odds_parts else "—"
+
+        lines.append(f"**{g['away']} @ {g['home']}** — {time_str}\n{odds_str}")
+
+    description = "\n\n".join(lines)
+    embed = {
+        "embeds": [{
+            "title": f"🔒 NRFI Slate — {today_et()}",
+            "description": description,
+            "color": 0x3b82f6,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }]
+    }
+    r = requests.post(DISCORD_WEBHOOK_2, json=embed, timeout=10)
+    r.raise_for_status()
+    print("  ✓ Degen morning summary sent")
+
+
 # ── Dupe guard: morning summary ───────────────────────────────────────────────
 def morning_summary_sent_today() -> bool:
     today = today_et()
@@ -453,6 +529,7 @@ def run():
             print("  Morning summary already sent today.")
         else:
             send_morning_summary(all_games, bpp_games)
+            send_degen_morning_summary(all_games)
             mark_morning_summary_sent()
         return
 
@@ -487,6 +564,14 @@ def run():
             bpp_nrfi     = bpp["nrfi_pct"] if bpp else None,
             away_win     = bpp["away_win_pct"] if bpp else None,
             home_win     = bpp["home_win_pct"] if bpp else None,
+            away_pitcher = bpp["away_pitcher"] if bpp else None,
+            home_pitcher = bpp["home_pitcher"] if bpp else None,
+        )
+        send_degen_game_alert(
+            away         = g["away"],
+            home         = g["home"],
+            books        = g["books"],
+            bpp_nrfi     = bpp["nrfi_pct"] if bpp else None,
             away_pitcher = bpp["away_pitcher"] if bpp else None,
             home_pitcher = bpp["home_pitcher"] if bpp else None,
         )
