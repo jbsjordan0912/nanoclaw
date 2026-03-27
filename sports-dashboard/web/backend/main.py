@@ -594,6 +594,124 @@ async def kalshi_prices_all():
 
 
 # ---------------------------------------------------------------------------
+# Kalshi orderbook
+# ---------------------------------------------------------------------------
+
+@app.get("/api/kalshi/orderbook/{ticker}")
+async def kalshi_orderbook(ticker: str):
+    """Fetch full orderbook depth for a Kalshi market."""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            r = await client.get(
+                f"{KALSHI_API_BASE}/markets/{ticker}/orderbook",
+                headers={"accept": "application/json"},
+            )
+            if r.status_code != 200:
+                return {"error": f"Kalshi returned {r.status_code}"}
+            ob = r.json().get("orderbook_fp", r.json().get("orderbook", {}))
+
+            # yes_dollars = bids (people wanting to buy yes)
+            # no_dollars = asks (people wanting to buy no = sell yes)
+            # Convert no_dollars to yes ask prices: ask = 1 - no_price
+            yes_bids = [
+                {"price": round(float(p) * 100), "size": int(float(s))}
+                for p, s in ob.get("yes_dollars", [])
+            ]
+            yes_asks = [
+                {"price": round((1 - float(p)) * 100), "size": int(float(s))}
+                for p, s in ob.get("no_dollars", [])
+            ]
+
+            # Sort: bids descending, asks ascending
+            yes_bids.sort(key=lambda x: x["price"], reverse=True)
+            yes_asks.sort(key=lambda x: x["price"])
+
+            return {
+                "ticker": ticker,
+                "bids": yes_bids,
+                "asks": yes_asks,
+                "best_bid": yes_bids[0] if yes_bids else None,
+                "best_ask": yes_asks[0] if yes_asks else None,
+            }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.get("/api/kalshi/game-tickers")
+async def kalshi_game_tickers(home_team: str = "", away_team: str = ""):
+    """Find both team tickers for a game. Returns {home: {ticker, abbr}, away: {ticker, abbr}}."""
+    import httpx, re
+    home_k = _kalshi_name(home_team)
+    away_k = _kalshi_name(away_team)
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            seen, all_markets = set(), []
+            for status in ("active", "open"):
+                r = await client.get(
+                    f"{KALSHI_API_BASE}/markets",
+                    params={"series_ticker": "KXMLBGAME", "status": status, "limit": 200},
+                    headers={"accept": "application/json"},
+                )
+                if r.status_code == 200:
+                    for m in r.json().get("markets", []):
+                        if m.get("ticker") and m["ticker"] not in seen:
+                            seen.add(m["ticker"])
+                            all_markets.append(m)
+
+            # Find markets matching both teams
+            matched = [
+                m for m in all_markets
+                if home_k and away_k
+                and home_k in (m.get("title") or "").lower()
+                and away_k in (m.get("title") or "").lower()
+            ]
+
+            # Group by event (game key) and pick the one with most volume
+            from collections import defaultdict
+            events = defaultdict(list)
+            for m in matched:
+                game_key = re.sub(r"-[A-Z]{2,4}$", "", m["ticker"])
+                events[game_key].append(m)
+
+            # Pick the game event with the most total volume
+            best_event = None
+            best_vol = -1
+            for key, markets in events.items():
+                vol = sum(_parse_volume(m) for m in markets)
+                if vol > best_vol:
+                    best_vol = vol
+                    best_event = markets
+
+            if not best_event or len(best_event) < 2:
+                return {"error": "Could not find both team tickers"}
+
+            # Determine which is home/away by subtitle
+            result = {"game_key": re.sub(r"-[A-Z]{2,4}$", "", best_event[0]["ticker"])}
+            for m in best_event:
+                abbr = m["ticker"].split("-")[-1]
+                sub = (m.get("yes_sub_title") or "").lower()
+                yb = _parse_dollars(m.get("yes_bid_dollars"))
+                ya = _parse_dollars(m.get("yes_ask_dollars"))
+                lp = _parse_dollars(m.get("last_price_dollars"))
+                info = {"ticker": m["ticker"], "abbr": abbr, "yes_bid": yb, "yes_ask": ya, "last_price": lp, "volume": _parse_volume(m)}
+                if home_k in sub:
+                    result["home"] = info
+                elif away_k in sub:
+                    result["away"] = info
+                else:
+                    # Fallback: assign by order
+                    if "home" not in result:
+                        result["home"] = info
+                    else:
+                        result["away"] = info
+
+            return result
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ---------------------------------------------------------------------------
 # Kalshi WebSocket proxy — streams real-time price to frontend
 # ---------------------------------------------------------------------------
 

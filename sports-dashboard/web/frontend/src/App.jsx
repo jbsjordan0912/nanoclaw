@@ -1107,6 +1107,244 @@ function WPDashboard() {
   )
 }
 
+// ── PLAKATA ──────────────────────────────────────────────────────────────────
+function OrderbookSide({ levels, side, bestPrice }) {
+  const [expanded, setExpanded] = useState(false)
+  const isBid = side === 'bid'
+  const color = isBid ? '#3b82f6' : '#ef4444'
+  const label = isBid ? 'BID' : 'ASK'
+
+  if (!levels || levels.length === 0) return null
+
+  const best = levels[0]
+  const maxSize = Math.max(...levels.map(l => l.size))
+  const shown = expanded ? levels : [best]
+
+  return (
+    <div>
+      <div
+        onClick={() => setExpanded(!expanded)}
+        style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}
+      >
+        <span style={{ fontSize: 10, color: '#475569', fontWeight: 700, textTransform: 'uppercase' }}>{label}</span>
+        <span style={{ fontSize: 10, color: '#334155' }}>{expanded ? '▼' : '▶'} {levels.length} levels</span>
+      </div>
+      {shown.map((level, i) => (
+        <div key={i} style={{ position: 'relative', marginBottom: 2 }}>
+          <div style={{
+            position: 'absolute', top: 0, [isBid ? 'right' : 'left']: 0, bottom: 0,
+            width: `${(level.size / maxSize) * 100}%`,
+            background: `${color}15`, borderRadius: 4,
+          }} />
+          <div style={{
+            position: 'relative', display: 'flex', justifyContent: 'space-between',
+            padding: '3px 8px', fontSize: i === 0 ? 15 : 13,
+            fontWeight: i === 0 ? 800 : 400,
+            color: i === 0 ? color : '#94a3b8',
+          }}>
+            <span>{level.price}¢</span>
+            <span style={{ color: '#475569', fontSize: i === 0 ? 13 : 11 }}>
+              {level.size.toLocaleString()}
+            </span>
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function TeamOrderbook({ team, abbr, ticker, wsData }) {
+  const [orderbook, setOrderbook] = useState(null)
+  const [loading, setLoading] = useState(false)
+
+  // Fetch orderbook on mount and every 10s
+  const fetchOb = useCallback(async () => {
+    if (!ticker) return
+    try {
+      const r = await fetch(`${API}/api/kalshi/orderbook/${ticker}`)
+      const d = await r.json()
+      if (!d.error) setOrderbook(d)
+    } catch {}
+  }, [ticker])
+
+  useEffect(() => {
+    fetchOb()
+    const t = setInterval(fetchOb, 10000)
+    return () => clearInterval(t)
+  }, [fetchOb])
+
+  // Merge WS top-of-book into orderbook display
+  const liveAsk = wsData?.ask
+  const liveBid = wsData?.bid
+
+  const bestAsk = orderbook?.best_ask
+  const bestBid = orderbook?.best_bid
+  const displayAsk = liveAsk > 0 ? Math.round(liveAsk * 100) : bestAsk?.price
+  const displayBid = liveBid > 0 ? Math.round(liveBid * 100) : bestBid?.price
+
+  return (
+    <div style={{
+      background: '#1e293b', borderRadius: 12, padding: 16, marginBottom: 12,
+      border: '1px solid #334155',
+    }}>
+      {/* Team header + best ask */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+        <div>
+          <div style={{ fontSize: 16, fontWeight: 800, color: '#e2e8f0' }}>{abbr}</div>
+          <div style={{ fontSize: 11, color: '#475569' }}>{team}</div>
+        </div>
+        <div style={{ textAlign: 'right' }}>
+          <div style={{ fontSize: 10, color: '#475569', marginBottom: 2 }}>BEST ASK</div>
+          <div style={{ fontSize: 28, fontWeight: 900, color: '#ef4444', lineHeight: 1 }}>
+            {displayAsk != null ? `${displayAsk}¢` : '—'}
+          </div>
+          {bestAsk?.size && (
+            <div style={{ fontSize: 10, color: '#475569', marginTop: 2 }}>
+              {bestAsk.size.toLocaleString()} contracts
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Orderbook */}
+      {orderbook && (
+        <div style={{ display: 'flex', gap: 12 }}>
+          <div style={{ flex: 1 }}>
+            <OrderbookSide levels={orderbook.bids} side="bid" bestPrice={displayBid} />
+          </div>
+          <div style={{ flex: 1 }}>
+            <OrderbookSide levels={orderbook.asks} side="ask" bestPrice={displayAsk} />
+          </div>
+        </div>
+      )}
+
+      {loading && <div style={{ fontSize: 11, color: '#475569', textAlign: 'center' }}>Loading...</div>}
+    </div>
+  )
+}
+
+function PlakataTab() {
+  const [games, setGames] = useState([])
+  const [selectedGame, setSelectedGame] = useState(null)
+  const [gameData, setGameData] = useState(null) // { home: {ticker, abbr}, away: {ticker, abbr} }
+  const [wsConnected, setWsConnected] = useState(false)
+  const [wsPrices, setWsPrices] = useState({}) // { "LAD": {bid, ask, last}, "AZ": {bid, ask, last} }
+  const wsRef = useRef(null)
+
+  // Load today's games
+  useEffect(() => {
+    fetch(`${API}/api/games/today`).then(r => r.json()).then(setGames).catch(() => {})
+  }, [])
+
+  // When game selected, find both tickers
+  useEffect(() => {
+    if (!selectedGame) { setGameData(null); return }
+    const g = games.find(g => g.game_pk === selectedGame)
+    if (!g) return
+    fetch(`${API}/api/kalshi/game-tickers?home_team=${encodeURIComponent(g.home_team)}&away_team=${encodeURIComponent(g.away_team)}`)
+      .then(r => r.json())
+      .then(d => {
+        if (!d.error) setGameData(d)
+      })
+      .catch(() => {})
+  }, [selectedGame, games])
+
+  // Connect WS when we have game data
+  useEffect(() => {
+    if (wsRef.current) { wsRef.current.close(); wsRef.current = null }
+    setWsConnected(false)
+    setWsPrices({})
+    if (!gameData?.game_key) return
+
+    const ws = new WebSocket(getKalshiWsUrl({ gameKey: gameData.game_key }))
+    wsRef.current = ws
+
+    ws.onmessage = (e) => {
+      const data = JSON.parse(e.data)
+      if (data.status === 'connected') {
+        setWsConnected(true)
+      } else if (data.type === 'price') {
+        setWsPrices(prev => ({
+          ...prev,
+          [data.team]: { bid: data.yes_bid, ask: data.yes_ask, last: data.last_price },
+        }))
+      }
+    }
+    ws.onclose = () => setWsConnected(false)
+    ws.onerror = () => setWsConnected(false)
+
+    return () => { ws.close() }
+  }, [gameData])
+
+  return (
+    <div style={{ animation: 'fadeIn 0.3s ease' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+        <div style={{ fontSize: 13, fontWeight: 700, color: '#94a3b8' }}>
+          PLAKATA
+        </div>
+        {wsConnected && (
+          <span style={{ fontSize: 10, color: '#22c55e', fontWeight: 700 }}>● LIVE</span>
+        )}
+      </div>
+
+      {/* Game picker */}
+      <select
+        value={selectedGame || ''}
+        onChange={e => setSelectedGame(e.target.value ? Number(e.target.value) : null)}
+        style={{
+          width: '100%', padding: '10px 12px', borderRadius: 8,
+          background: '#1e293b', border: '1px solid #334155',
+          color: '#f1f5f9', fontSize: 14, marginBottom: 16, outline: 'none',
+        }}
+      >
+        <option value="">Select a game...</option>
+        {games.map(g => (
+          <option key={g.game_pk} value={g.game_pk}>
+            {g.away_team} @ {g.home_team} — {g.status}
+            {g.status === 'Live' ? ` (${g.inning_half} ${g.inning})` : ''}
+          </option>
+        ))}
+      </select>
+
+      {/* Away team */}
+      {gameData?.away && (
+        <TeamOrderbook
+          team={games.find(g => g.game_pk === selectedGame)?.away_team || ''}
+          abbr={gameData.away.abbr}
+          ticker={gameData.away.ticker}
+          wsData={wsPrices[gameData.away.abbr]}
+        />
+      )}
+
+      {/* Home team */}
+      {gameData?.home && (
+        <TeamOrderbook
+          team={games.find(g => g.game_pk === selectedGame)?.home_team || ''}
+          abbr={gameData.home.abbr}
+          ticker={gameData.home.ticker}
+          wsData={wsPrices[gameData.home.abbr]}
+        />
+      )}
+
+      {selectedGame && !gameData && (
+        <div style={{ fontSize: 13, color: '#475569', textAlign: 'center', padding: 20 }}>
+          Loading Kalshi markets...
+        </div>
+      )}
+
+      {!selectedGame && (
+        <div style={{ fontSize: 13, color: '#475569', textAlign: 'center', padding: 40 }}>
+          Select a game to view live orderbook
+        </div>
+      )}
+
+      <div style={{ fontSize: 11, color: '#334155', textAlign: 'center', paddingTop: 8 }}>
+        Orderbook refreshes every 10s · Top-of-book via WebSocket
+      </div>
+    </div>
+  )
+}
+
 // ── Shared styles ─────────────────────────────────────────────────────────────
 const labelStyle = { display: 'block', fontSize: 11, color: '#94a3b8', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.05em' }
 const nudgeBtn = {
@@ -1132,9 +1370,10 @@ export default function App() {
       {/* Tab switcher */}
       <div style={{ display: 'flex', borderRadius: 10, overflow: 'hidden', border: '1px solid #1e293b', marginBottom: 20, background: '#1e293b' }}>
         {[
-          { id: 'wp',     label: '📊 WP / Kalshi' },
-          { id: 'sim',    label: '⚾ At-Bat Sim' },
-          { id: 'spring', label: '🌸 Spring Odds' },
+          { id: 'wp',       label: '📊 WP' },
+          { id: 'sim',      label: '⚾ Sim' },
+          { id: 'plakata',  label: '💥 Plakata' },
+          { id: 'spring',   label: '🌸 Odds' },
         ].map(t => (
           <button key={t.id} onClick={() => setTab(t.id)} style={{
             flex: 1, padding: '11px 0', border: 'none', fontSize: 13, fontWeight: 600,
@@ -1145,7 +1384,7 @@ export default function App() {
         ))}
       </div>
 
-      {tab === 'wp' ? <WPDashboard /> : tab === 'sim' ? <AtBatTab /> : <SpringOddsTab />}
+      {tab === 'wp' ? <WPDashboard /> : tab === 'sim' ? <AtBatTab /> : tab === 'plakata' ? <PlakataTab /> : <SpringOddsTab />}
 
       <style>{`
         * { box-sizing: border-box; }
