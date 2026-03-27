@@ -302,54 +302,54 @@ async def game_state(game_pk: int):
 
         away_runs = ls.get("teams", {}).get("away", {}).get("runs", 0)
         home_runs = ls.get("teams", {}).get("home", {}).get("runs", 0)
-    bat_score = away_runs if is_top else home_runs
-    fld_score = home_runs if is_top else away_runs
+        bat_score = away_runs if is_top else home_runs
+        fld_score = home_runs if is_top else away_runs
 
-    offense = ls.get("offense", {})
+        offense = ls.get("offense", {})
 
-    # Current pitcher (defense side)
-    defense  = ls.get("defense", {})
-    pitcher  = defense.get("pitcher", {})
-    pitcher_id   = pitcher.get("id")
-    pitcher_name = pitcher.get("fullName")
+        # Current pitcher (defense side)
+        defense  = ls.get("defense", {})
+        pitcher  = defense.get("pitcher", {})
+        pitcher_id   = pitcher.get("id")
+        pitcher_name = pitcher.get("fullName")
 
-    # Build lineups from boxscore
-    def lineup(side):
-        players = bx["teams"][side]["players"]
-        batters = [(v["battingOrder"], v["person"]["id"], v["person"]["fullName"])
-                   for v in players.values() if v.get("battingOrder")]
-        return [{"id": bid, "name": name}
-                for _, bid, name in sorted(batters, key=lambda x: x[0])]
+        # Build lineups from boxscore
+        def lineup(side):
+            players = bx.get("teams", {}).get(side, {}).get("players", {})
+            batters = [(v["battingOrder"], v["person"]["id"], v["person"]["fullName"])
+                       for v in players.values() if v.get("battingOrder")]
+            return [{"id": bid, "name": name}
+                    for _, bid, name in sorted(batters, key=lambda x: x[0])]
 
-    batting_side  = "away" if is_top else "home"
-    fielding_side = "home" if is_top else "away"
+        batting_side  = "away" if is_top else "home"
+        fielding_side = "home" if is_top else "away"
 
-    return {
-        "game_pk":    game_pk,
-        "status":     data["gameData"]["status"]["abstractGameState"],
-        "inning":     ls.get("currentInning", 1),
-        "topbot":     topbot,
-        "outs":       ls.get("outs", 0),
-        "on_1b":      bool(offense.get("first")),
-        "on_2b":      bool(offense.get("second")),
-        "on_3b":      bool(offense.get("third")),
-        "bat_score":  bat_score,
-        "fld_score":  fld_score,
-        "away_team":  gd["teams"]["away"]["name"],
-        "home_team":  gd["teams"]["home"]["name"],
-        "batting_team":  gd["teams"][batting_side]["name"],
-        "fielding_team": gd["teams"][fielding_side]["name"],
-        "pitcher_id":   pitcher_id,
-        "pitcher_name": pitcher_name,
-        "balls":        ls.get("balls", 0),
-        "strikes":      ls.get("strikes", 0),
-        "batting_lineup":  lineup(batting_side),
-        "fielding_lineup": lineup(fielding_side),
-        "batter": {
-            "id":   offense.get("batter", {}).get("id"),
-            "name": offense.get("batter", {}).get("fullName"),
-        },
-    }
+        return {
+            "game_pk":    game_pk,
+            "status":     gd.get("status", {}).get("abstractGameState", "Unknown"),
+            "inning":     ls.get("currentInning", 1),
+            "topbot":     topbot,
+            "outs":       ls.get("outs", 0),
+            "on_1b":      bool(offense.get("first")),
+            "on_2b":      bool(offense.get("second")),
+            "on_3b":      bool(offense.get("third")),
+            "bat_score":  bat_score,
+            "fld_score":  fld_score,
+            "away_team":  gd.get("teams", {}).get("away", {}).get("name", "?"),
+            "home_team":  gd.get("teams", {}).get("home", {}).get("name", "?"),
+            "batting_team":  gd.get("teams", {}).get(batting_side, {}).get("name", "?"),
+            "fielding_team": gd.get("teams", {}).get(fielding_side, {}).get("name", "?"),
+            "pitcher_id":   pitcher_id,
+            "pitcher_name": pitcher_name,
+            "balls":        ls.get("balls", 0),
+            "strikes":      ls.get("strikes", 0),
+            "batting_lineup":  lineup(batting_side),
+            "fielding_lineup": lineup(fielding_side),
+            "batter": {
+                "id":   offense.get("batter", {}).get("id"),
+                "name": offense.get("batter", {}).get("fullName"),
+            },
+        }
     except Exception as e:
         return {"error": str(e), "status": "Unknown"}
 
