@@ -730,28 +730,20 @@ function WPDashboard() {
       // Extract game key (ticker without the team suffix)
       const gameKey = kd.ticker.replace(/-[A-Z]{2,4}$/, '')
 
-      // Seed both sides from REST
-      if (kd.price != null) {
-        const team = kd.ticker.split('-').pop()
-        kalshiPricesRef.current[team] = { bid: kd.yes_bid, ask: kd.yes_ask, last: kd.last_price }
-      }
-      if (kd.other?.price != null) {
-        const team = kd.other.ticker.split('-').pop()
-        kalshiPricesRef.current[team] = { bid: kd.other.yes_bid, ask: kd.other.yes_ask, last: kd.other.last_price }
-      }
-
-      // Determine which team abbreviations map to home/away
-      // Store mapping so we can pick the right price based on batting team
-      const tickerTeams = Object.keys(kalshiPricesRef.current)
+      // Seed from REST — use the primary ticker's price
+      const primaryTeam = kd.ticker.split('-').pop()
+      kalshiPricesRef.current[primaryTeam] = { bid: kd.yes_bid, ask: kd.yes_ask, last: kd.last_price }
       kalshiPricesRef.current._homeTeam = g.home_team
       kalshiPricesRef.current._awayTeam = g.away_team
-      kalshiPricesRef.current._homeAbbr = tickerTeams.find(t =>
-        kd.ticker.includes(t) && (kd.subtitle || '').toLowerCase().includes(g.home_team.split(' ').pop().toLowerCase())
-      ) || tickerTeams[1] || ''
-      kalshiPricesRef.current._awayAbbr = tickerTeams.find(t => t !== kalshiPricesRef.current._homeAbbr) || tickerTeams[0] || ''
 
-      // Set initial display — show home team price
-      updateKalshiDisplay()
+      // Set initial display from REST seed
+      const mid = (kd.yes_bid > 0 && kd.yes_ask > 0)
+        ? (kd.yes_bid + kd.yes_ask) / 2
+        : kd.last_price || kd.yes_bid
+      if (mid > 0) {
+        kalshiOverrideRef.current = mid
+        setKalshiInput(String(Math.round(mid * 100)))
+      }
 
       // Connect WS to both tickers
       const ws = new WebSocket(getKalshiWsUrl({ gameKey }))
@@ -768,7 +760,14 @@ function WPDashboard() {
             ask: data.yes_ask,
             last: data.last_price,
           }
-          updateKalshiDisplay()
+          // Update display with this team's midpoint
+          const mid = (data.yes_bid > 0 && data.yes_ask > 0)
+            ? (data.yes_bid + data.yes_ask) / 2
+            : data.last_price || data.yes_bid
+          if (mid > 0) {
+            kalshiOverrideRef.current = mid
+            setKalshiInput(String(Math.round(mid * 100)))
+          }
           setKalshiLive(true)
         } else if (data.error) {
           console.warn('Kalshi WS error:', data.error)
