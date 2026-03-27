@@ -1311,7 +1311,7 @@ function Scorebug({ gameState, awayAsk, homeAsk }) {
 }
 
 // ── WPA Outcome Table (anchored to Kalshi price) ─────────────────────────────
-function WPATable({ wpData, battingTeam, kalshiAsk }) {
+function WPATable({ wpData, battingTeam, kalshiAsk, onTrade }) {
   if (!wpData?.outcomes) return null
 
   // Use Kalshi ask as the anchor. WPA shifts are relative — apply them to Kalshi price.
@@ -1338,14 +1338,19 @@ function WPATable({ wpData, battingTeam, kalshiAsk }) {
         const isBig = Math.abs(shift) >= 0.05
         const color = isPositive ? '#22c55e' : '#ef4444'
 
+        const canTrade = onTrade && isPositive && shiftCents >= 3
+
         return (
-          <div key={i} style={{
+          <div key={i} onClick={() => canTrade && onTrade(o)} style={{
             display: 'flex', justifyContent: 'space-between', alignItems: 'center',
             padding: '6px 8px', borderRadius: 6, marginBottom: 2,
             background: isBig ? `${color}10` : 'transparent',
             border: isBig ? `1px solid ${color}22` : '1px solid transparent',
+            cursor: canTrade ? 'pointer' : 'default',
+            transition: 'background 0.1s',
           }}>
             <span style={{ fontSize: 13, color: '#e2e8f0', fontWeight: isBig ? 700 : 400 }}>
+              {canTrade && <span style={{ marginRight: 4 }}>⚡</span>}
               {o.label}
             </span>
             <div style={{ textAlign: 'right' }}>
@@ -1380,6 +1385,74 @@ function PlakataTab() {
   const [pinInput, setPinInput] = useState('')
   const [pinError, setPinError] = useState('')
   const [showPinModal, setShowPinModal] = useState(false)
+
+  // Trading settings
+  const [maxSpend, setMaxSpend] = useState(50)      // dollars
+  const [buffer, setBuffer] = useState(5)            // cents
+
+  // Trade confirmation
+  const [tradeModal, setTradeModal] = useState(null)  // { outcome, ticker, team, currentAsk, targetPrice }
+  const [tradePreview, setTradePreview] = useState(null)
+  const [tradeLoading, setTradeLoading] = useState(false)
+  const [tradeResult, setTradeResult] = useState(null)
+
+  const openTrade = async (outcome) => {
+    if (!tradeUnlocked || !gameData || !gameState) return
+    const isTop = gameState.topbot === 'Top'
+    const battingAbbr = isTop ? gameData.away?.abbr : gameData.home?.abbr
+    const battingTicker = isTop ? gameData.away?.ticker : gameData.home?.ticker
+    const battingTeamName = isTop ? gameState.away_team : gameState.home_team
+    const battingWs = wsPrices[battingAbbr]
+    const currentAsk = battingWs?.ask > 0 ? Math.round(battingWs.ask * 100) : null
+    if (!battingTicker || !currentAsk) return
+
+    const shiftCents = Math.round(outcome.wpa * 100)
+    const targetPrice = currentAsk + shiftCents
+    const maxPrice = targetPrice - buffer
+
+    if (maxPrice <= currentAsk) return // no room after buffer
+
+    setTradeModal({ outcome, ticker: battingTicker, team: battingTeamName, abbr: battingAbbr, currentAsk, targetPrice, maxPrice })
+    setTradePreview(null)
+    setTradeResult(null)
+    setTradeLoading(true)
+
+    try {
+      const r = await fetch(`${API}/api/trade/preview`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ticker: battingTicker,
+          max_spend_cents: maxSpend * 100,
+          max_price_cents: maxPrice,
+          side: 'yes',
+        }),
+      })
+      setTradePreview(await r.json())
+    } catch (e) { setTradePreview({ error: e.message }) }
+    finally { setTradeLoading(false) }
+  }
+
+  const executeTrade = async () => {
+    if (!tradeModal || !tradePreview?.fills?.length) return
+    setTradeLoading(true)
+    setTradeResult(null)
+    try {
+      const r = await fetch(`${API}/api/trade/execute`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ticker: tradeModal.ticker,
+          max_spend_cents: maxSpend * 100,
+          max_price_cents: tradeModal.maxPrice,
+          side: 'yes',
+          trade_token: tradeToken,
+        }),
+      })
+      setTradeResult(await r.json())
+    } catch (e) { setTradeResult({ error: e.message, ok: false }) }
+    finally { setTradeLoading(false) }
+  }
 
   const unlockTrading = async () => {
     setPinError('')
@@ -1599,10 +1672,115 @@ function PlakataTab() {
       </select>
 
       {/* Scorebug */}
+      {/* Trade confirmation modal */}
+      {tradeModal && (
+        <div style={{
+          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.8)', zIndex: 100,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+        }} onClick={() => { setTradeModal(null); setTradeResult(null) }}>
+          <div style={{
+            background: '#1e293b', borderRadius: 16, padding: 20, width: 320,
+            border: '1px solid #334155', maxHeight: '80vh', overflow: 'auto',
+          }} onClick={e => e.stopPropagation()}>
+            <div style={{ fontSize: 15, fontWeight: 800, color: '#e2e8f0', marginBottom: 4 }}>
+              Buy YES {tradeModal.abbr}
+            </div>
+            <div style={{ fontSize: 12, color: '#475569', marginBottom: 12 }}>
+              If {tradeModal.outcome.label} — sweep {tradeModal.currentAsk}¢ to {tradeModal.maxPrice}¢
+            </div>
+
+            {tradeLoading && <div style={{ color: '#94a3b8', fontSize: 13, padding: 12, textAlign: 'center' }}>Loading...</div>}
+
+            {tradePreview && !tradePreview.error && !tradeResult && (
+              <div>
+                {tradePreview.fills?.map((f, i) => (
+                  <div key={i} style={{
+                    display: 'flex', justifyContent: 'space-between', padding: '4px 0',
+                    fontSize: 13, color: '#94a3b8', borderBottom: '1px solid #0f172a',
+                  }}>
+                    <span>{f.price}¢ × {f.contracts}</span>
+                    <span>${(f.cost_cents / 100).toFixed(2)}</span>
+                  </div>
+                ))}
+                <div style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 0 4px', fontSize: 14, fontWeight: 700, color: '#e2e8f0' }}>
+                  <span>{tradePreview.total_contracts} contracts</span>
+                  <span>${tradePreview.total_cost_dollars}</span>
+                </div>
+                <div style={{ fontSize: 12, color: '#22c55e', marginBottom: 12 }}>
+                  Max payout: ${tradePreview.max_payout_dollars} (profit: ${tradePreview.potential_profit_dollars})
+                </div>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button onClick={() => { setTradeModal(null); setTradeResult(null) }} style={{
+                    flex: 1, padding: '10px 0', borderRadius: 8, border: '1px solid #334155',
+                    background: 'transparent', color: '#94a3b8', fontSize: 14, cursor: 'pointer',
+                  }}>Cancel</button>
+                  <button onClick={executeTrade} disabled={tradeLoading} style={{
+                    flex: 1, padding: '10px 0', borderRadius: 8, border: 'none',
+                    background: '#22c55e', color: '#000', fontSize: 14, fontWeight: 800, cursor: 'pointer',
+                  }}>Confirm</button>
+                </div>
+              </div>
+            )}
+
+            {tradePreview?.error && (
+              <div style={{ color: '#ef4444', fontSize: 13 }}>{tradePreview.error}</div>
+            )}
+
+            {tradeResult && (
+              <div style={{ padding: '8px 0' }}>
+                <div style={{
+                  fontSize: 14, fontWeight: 700, marginBottom: 8,
+                  color: tradeResult.ok ? '#22c55e' : '#ef4444',
+                }}>
+                  {tradeResult.ok ? `Filled ${tradeResult.summary?.total_contracts} contracts` : 'Order failed'}
+                </div>
+                {tradeResult.error && <div style={{ fontSize: 12, color: '#ef4444' }}>{tradeResult.error}</div>}
+                {tradeResult.summary && (
+                  <div style={{ fontSize: 12, color: '#475569' }}>
+                    Cost: ${(tradeResult.summary.total_cost_cents / 100).toFixed(2)} ·
+                    {tradeResult.summary.successful}/{tradeResult.summary.total_orders} orders filled
+                  </div>
+                )}
+                <button onClick={() => { setTradeModal(null); setTradeResult(null) }} style={{
+                  width: '100%', marginTop: 12, padding: '10px 0', borderRadius: 8, border: 'none',
+                  background: '#334155', color: '#e2e8f0', fontSize: 14, cursor: 'pointer',
+                }}>Close</button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       <Scorebug gameState={gameState} awayAsk={awayAsk} homeAsk={homeAsk} />
 
+      {/* Trade settings — only when unlocked */}
+      {tradeUnlocked && (
+        <div style={{
+          background: '#1e293b', borderRadius: 10, padding: '10px 12px', marginBottom: 12,
+          border: '1px solid #f59e0b33', display: 'flex', gap: 12, alignItems: 'center',
+        }}>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 9, color: '#475569', marginBottom: 2 }}>MAX SPEND</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+              <span style={{ fontSize: 13, color: '#94a3b8' }}>$</span>
+              <input value={maxSpend} onChange={e => setMaxSpend(Number(e.target.value) || 0)} type="number"
+                style={{ width: 60, padding: '4px 6px', borderRadius: 6, background: '#0f172a', border: '1px solid #334155', color: '#f1f5f9', fontSize: 14, outline: 'none' }} />
+            </div>
+          </div>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 9, color: '#475569', marginBottom: 2 }}>BUFFER</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+              <input value={buffer} onChange={e => setBuffer(Number(e.target.value) || 0)} type="number"
+                style={{ width: 50, padding: '4px 6px', borderRadius: 6, background: '#0f172a', border: '1px solid #334155', color: '#f1f5f9', fontSize: 14, outline: 'none' }} />
+              <span style={{ fontSize: 13, color: '#94a3b8' }}>¢</span>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* WPA Outcome Table */}
-      <WPATable wpData={wpData} battingTeam={battingTeam} kalshiAsk={battingKalshiAsk} />
+      <WPATable wpData={wpData} battingTeam={battingTeam} kalshiAsk={battingKalshiAsk}
+        onTrade={tradeUnlocked ? openTrade : null} />
 
       {/* Orderbooks */}
       {gameData?.away && (

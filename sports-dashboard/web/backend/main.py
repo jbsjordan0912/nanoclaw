@@ -635,6 +635,181 @@ def _verify_trade_token(token: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Trading: preview + execute
+# ---------------------------------------------------------------------------
+
+class SweepPreviewRequest(BaseModel):
+    ticker: str
+    max_spend_cents: int    # max total spend in cents (e.g. 5000 = $50)
+    max_price_cents: int    # highest price to buy at (e.g. 67 = 67¢)
+    side: str = "yes"       # "yes" or "no"
+
+
+class SweepExecuteRequest(BaseModel):
+    ticker: str
+    max_spend_cents: int
+    max_price_cents: int
+    side: str = "yes"
+    trade_token: str
+
+
+@app.post("/api/trade/preview")
+async def trade_preview(req: SweepPreviewRequest):
+    """Preview a sweep: show how many contracts at each level and total cost."""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            r = await client.get(
+                f"{KALSHI_API_BASE}/markets/{req.ticker}/orderbook",
+                headers={"accept": "application/json"},
+            )
+            if r.status_code != 200:
+                return {"error": f"Orderbook fetch failed ({r.status_code})"}
+
+            ob = r.json().get("orderbook_fp", r.json().get("orderbook", {}))
+
+            # For buying YES: asks come from no_dollars (ask = 100 - no_price)
+            if req.side == "yes":
+                raw_asks = ob.get("no_dollars", [])
+                levels = [
+                    {"price": round((1 - float(p)) * 100), "size": int(float(s))}
+                    for p, s in raw_asks
+                ]
+                levels.sort(key=lambda x: x["price"])  # cheapest first
+            else:
+                raw_bids = ob.get("yes_dollars", [])
+                levels = [
+                    {"price": round(float(p) * 100), "size": int(float(s))}
+                    for p, s in raw_bids
+                ]
+                levels.sort(key=lambda x: x["price"], reverse=True)  # best price first
+
+            # Sweep: buy from best ask up to max_price, within budget
+            fills = []
+            total_cost = 0
+            total_contracts = 0
+            remaining_budget = req.max_spend_cents
+
+            for level in levels:
+                if req.side == "yes" and level["price"] > req.max_price_cents:
+                    break
+                if req.side == "no" and level["price"] < req.max_price_cents:
+                    break
+
+                # How many can we afford at this level?
+                affordable = remaining_budget // level["price"] if level["price"] > 0 else 0
+                take = min(affordable, level["size"])
+
+                if take <= 0:
+                    break
+
+                cost = take * level["price"]
+                fills.append({
+                    "price": level["price"],
+                    "contracts": take,
+                    "available": level["size"],
+                    "cost_cents": cost,
+                })
+                total_cost += cost
+                total_contracts += take
+                remaining_budget -= cost
+
+            return {
+                "ticker": req.ticker,
+                "side": req.side,
+                "fills": fills,
+                "total_contracts": total_contracts,
+                "total_cost_cents": total_cost,
+                "total_cost_dollars": round(total_cost / 100, 2),
+                "max_payout_dollars": round(total_contracts / 100, 2),
+                "potential_profit_dollars": round((total_contracts - total_cost) / 100, 2),
+            }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.post("/api/trade/execute")
+async def trade_execute(req: SweepExecuteRequest):
+    """Execute a sweep by placing limit orders at each price level."""
+    if not _verify_trade_token(req.trade_token):
+        return {"error": "Unauthorized", "ok": False}
+
+    import httpx
+
+    # First get the preview to know what to buy
+    preview_req = SweepPreviewRequest(
+        ticker=req.ticker,
+        max_spend_cents=req.max_spend_cents,
+        max_price_cents=req.max_price_cents,
+        side=req.side,
+    )
+    preview = await trade_preview(preview_req)
+    if preview.get("error"):
+        return {"error": preview["error"], "ok": False}
+
+    fills = preview.get("fills", [])
+    if not fills:
+        return {"error": "No contracts available at these prices", "ok": False}
+
+    # Place orders at each price level
+    results = []
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            for fill in fills:
+                path = "/trade-api/v2/portfolio/orders"
+                auth = _kalshi_auth_headers("POST", path)
+                if not auth:
+                    return {"error": "Kalshi auth not configured", "ok": False}
+                auth["accept"] = "application/json"
+                auth["content-type"] = "application/json"
+
+                order_body = {
+                    "action": "buy",
+                    "side": req.side,
+                    "ticker": req.ticker,
+                    "type": "limit",
+                    "count": fill["contracts"],
+                    "yes_price": fill["price"] if req.side == "yes" else (100 - fill["price"]),
+                }
+
+                r = await client.post(
+                    f"{KALSHI_API_BASE}/portfolio/orders",
+                    headers=auth,
+                    json=order_body,
+                )
+
+                order_result = {
+                    "price": fill["price"],
+                    "contracts": fill["contracts"],
+                    "status_code": r.status_code,
+                }
+                if r.status_code == 200 or r.status_code == 201:
+                    order_result["order"] = r.json()
+                    order_result["ok"] = True
+                else:
+                    order_result["error"] = r.text
+                    order_result["ok"] = False
+
+                results.append(order_result)
+
+    except Exception as e:
+        return {"error": str(e), "ok": False, "partial_results": results}
+
+    successful = sum(1 for r in results if r.get("ok"))
+    return {
+        "ok": successful > 0,
+        "orders": results,
+        "summary": {
+            "total_orders": len(results),
+            "successful": successful,
+            "failed": len(results) - successful,
+            "total_contracts": sum(r["contracts"] for r in results if r.get("ok")),
+            "total_cost_cents": sum(r["price"] * r["contracts"] for r in results if r.get("ok")),
+        }
+    }
+
+
+# ---------------------------------------------------------------------------
 # Kalshi orderbook
 # ---------------------------------------------------------------------------
 
