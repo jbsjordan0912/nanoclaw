@@ -1511,7 +1511,7 @@ function PlakataTab() {
 
   // Calculate WPA when game state changes (anchored to Kalshi price)
   useEffect(() => {
-    if (!gameState || gameState.status !== 'Live') { setWpData(null); return }
+    if (!gameState || gameState.status === 'Final') { setWpData(null); return }
 
     const isTop = gameState.topbot === 'Top'
     // Get batting team's Kalshi ask as current WP

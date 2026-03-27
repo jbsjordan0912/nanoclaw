@@ -295,6 +295,15 @@ async def game_state(game_pk: int):
                 "game_pk": game_pk, "status": "Preview",
                 "away_team": gd.get("teams", {}).get("away", {}).get("name", "?"),
                 "home_team": gd.get("teams", {}).get("home", {}).get("name", "?"),
+                "inning": 1, "topbot": "Top", "outs": 0,
+                "on_1b": False, "on_2b": False, "on_3b": False,
+                "bat_score": 0, "fld_score": 0,
+                "balls": 0, "strikes": 0,
+                "batting_team": gd.get("teams", {}).get("away", {}).get("name", "?"),
+                "fielding_team": gd.get("teams", {}).get("home", {}).get("name", "?"),
+                "pitcher_id": None, "pitcher_name": None,
+                "batting_lineup": [], "fielding_lineup": [],
+                "batter": {"id": None, "name": None},
             }
 
         inning_half = ls.get("inningHalf", "Top")
@@ -424,8 +433,8 @@ _MLB_KALSHI_NAME = {
     "minnesota twins":       "minnesota",
     "new york mets":         "new york m",
     "new york yankees":      "new york y",
-    "athletics":             "athletics",
-    "oakland athletics":     "athletics",
+    "athletics":             "a's",
+    "oakland athletics":     "a's",
     "philadelphia phillies": "philadelphia",
     "pittsburgh pirates":    "pittsburgh",
     "san diego padres":      "san diego",
