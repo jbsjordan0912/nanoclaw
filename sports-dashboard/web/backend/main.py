@@ -723,6 +723,10 @@ async def trade_preview(req: SweepPreviewRequest):
                 total_contracts += take
                 remaining_budget -= cost
 
+            # Kalshi fee: ~2¢ per contract (capped at contract price or 1-price, whichever is less)
+            total_fees = total_contracts * 2
+            total_with_fees = total_cost + total_fees
+
             return {
                 "ticker": req.ticker,
                 "side": req.side,
@@ -730,8 +734,11 @@ async def trade_preview(req: SweepPreviewRequest):
                 "total_contracts": total_contracts,
                 "total_cost_cents": total_cost,
                 "total_cost_dollars": round(total_cost / 100, 2),
+                "fees_cents": total_fees,
+                "fees_dollars": round(total_fees / 100, 2),
+                "total_with_fees_dollars": round(total_with_fees / 100, 2),
                 "max_payout_dollars": round(total_contracts, 2),
-                "potential_profit_dollars": round(total_contracts - total_cost / 100, 2),
+                "potential_profit_dollars": round(total_contracts - total_with_fees / 100, 2),
             }
     except Exception as e:
         return {"error": str(e)}

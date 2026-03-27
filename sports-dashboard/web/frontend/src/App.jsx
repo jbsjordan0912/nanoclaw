@@ -1702,9 +1702,17 @@ function PlakataTab() {
                     <span>${(f.cost_cents / 100).toFixed(2)}</span>
                   </div>
                 ))}
-                <div style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 0 4px', fontSize: 14, fontWeight: 700, color: '#e2e8f0' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 0 2px', fontSize: 14, fontWeight: 700, color: '#e2e8f0' }}>
                   <span>{tradePreview.total_contracts} contracts</span>
                   <span>${tradePreview.total_cost_dollars}</span>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', padding: '2px 0', fontSize: 12, color: '#475569' }}>
+                  <span>Fees (~2¢/contract)</span>
+                  <span>${tradePreview.fees_dollars}</span>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', padding: '2px 0 4px', fontSize: 13, fontWeight: 700, color: '#f1f5f9', borderTop: '1px solid #334155', marginTop: 4, paddingTop: 6 }}>
+                  <span>Total</span>
+                  <span>${tradePreview.total_with_fees_dollars}</span>
                 </div>
                 <div style={{ fontSize: 12, color: '#22c55e', marginBottom: 12 }}>
                   Max payout: ${tradePreview.max_payout_dollars} (profit: ${tradePreview.potential_profit_dollars})
