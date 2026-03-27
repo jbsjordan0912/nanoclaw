@@ -10,7 +10,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
 from dotenv import load_dotenv
-import asyncio, base64, time, json
+import asyncio, base64, time, json, hashlib
+from datetime import datetime, timezone, timedelta
 
 # Load backend .env first (Kalshi keys), then data-pipeline .env (Supabase etc.)
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
@@ -620,7 +621,6 @@ async def auth_trade(body: TradeAuthRequest):
         return {"ok": False, "error": "Trading not configured"}
     if body.password == TRADE_PASSWORD:
         # Simple token — hash of password + date so it changes daily
-        import hashlib
         token = hashlib.sha256(f"{TRADE_PASSWORD}:{datetime.now(timezone.utc).strftime('%Y-%m-%d')}".encode()).hexdigest()[:32]
         return {"ok": True, "token": token}
     return {"ok": False, "error": "Wrong password"}
@@ -630,7 +630,6 @@ def _verify_trade_token(token: str) -> bool:
     """Verify a trading token."""
     if not TRADE_PASSWORD or not token:
         return False
-    import hashlib
     expected = hashlib.sha256(f"{TRADE_PASSWORD}:{datetime.now(timezone.utc).strftime('%Y-%m-%d')}".encode()).hexdigest()[:32]
     return token == expected
 
