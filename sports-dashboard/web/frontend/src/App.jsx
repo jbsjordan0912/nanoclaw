@@ -782,24 +782,29 @@ function WPDashboard() {
     }
   }, [])
 
-  // Update Kalshi display based on current batting team
+  // Both teams' live prices for display
+  const [kalshiDisplay, setKalshiDisplay] = useState({ home: null, away: null, homeAbbr: '', awayAbbr: '' })
+
+  // Update Kalshi display — shows both teams' ask prices
   const updateKalshiDisplay = useCallback(() => {
     const prices = kalshiPricesRef.current
     const homeAbbr = prices._homeAbbr
     const awayAbbr = prices._awayAbbr
     if (!homeAbbr && !awayAbbr) return
 
-    // Show home team price by default (edge calculation uses batting team,
-    // but display shows the home team's win probability)
     const homeP = prices[homeAbbr]
     const awayP = prices[awayAbbr]
-    if (homeP) {
-      const mid = (homeP.bid > 0 && homeP.ask > 0)
-        ? (homeP.bid + homeP.ask) / 2
-        : homeP.last || homeP.bid
-      kalshiOverrideRef.current = mid
-      setKalshiInput(String(Math.round(mid * 100)))
-    }
+
+    setKalshiDisplay({
+      home: homeP ? { bid: homeP.bid, ask: homeP.ask, last: homeP.last } : null,
+      away: awayP ? { bid: awayP.bid, ask: awayP.ask, last: awayP.last } : null,
+      homeAbbr, awayAbbr,
+      homeName: prices._homeTeam,
+      awayName: prices._awayTeam,
+    })
+
+    // For edge calculation, use batting team's ASK (executable price to buy yes)
+    // This gets picked up by calculate() via kalshiPricesRef
   }, [])
 
   // Pure WS — seed once from REST on connect, then WS handles all updates
@@ -820,15 +825,13 @@ function WPDashboard() {
     setLoading(true); setError(null)
     try {
       const isTop = state.topbot === 'Top'
-      // Pick the batting team's Kalshi price from live WS data
+      // Pick the batting team's Kalshi ASK (executable buy price)
       let kPrice = null
       const prices = kalshiPricesRef.current
       const battingAbbr = isTop ? prices._awayAbbr : prices._homeAbbr
       const battingP = prices[battingAbbr]
       if (battingP) {
-        kPrice = (battingP.bid > 0 && battingP.ask > 0)
-          ? (battingP.bid + battingP.ask) / 2
-          : battingP.last || battingP.bid
+        kPrice = battingP.ask > 0 ? battingP.ask : battingP.last || battingP.bid
       }
       // Fall back to manual input if no live data
       if (kPrice == null && kalshiInput) {
@@ -1002,11 +1005,11 @@ function WPDashboard() {
         </div>
       </div>
 
-      {/* Kalshi price input */}
-      <div style={{ display: 'flex', gap: 10, marginBottom: 16, alignItems: 'flex-end' }}>
-        <div style={{ flex: 1 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
-            <label style={{ ...labelStyle, marginBottom: 0 }}>Kalshi Price (yes %)</label>
+      {/* Kalshi live prices — both teams */}
+      {kalshiDisplay.home && kalshiDisplay.away ? (
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
+            <label style={{ ...labelStyle, marginBottom: 0 }}>Kalshi Live</label>
             {kalshiLive
               ? <span style={{ fontSize: 10, color: '#22c55e', fontWeight: 700, letterSpacing: '0.05em' }}>● LIVE</span>
               : mode === 'auto' && selectedGame
@@ -1014,20 +1017,70 @@ function WPDashboard() {
                 : null
             }
           </div>
-          <input
-            value={kalshiInput}
-            onChange={e => { setKalshiInput(e.target.value); kalshiOverrideRef.current = null }}
-            onBlur={calculate}
-            placeholder="e.g. 48"
-            type="number"
-            style={{
-              width: '100%', padding: '10px 12px', borderRadius: 8,
-              background: '#1e293b',
-              border: `1px solid ${kalshiLive ? '#22c55e55' : '#334155'}`,
-              color: '#f1f5f9', fontSize: 15, outline: 'none', boxSizing: 'border-box',
-            }}
-          />
+          <div style={{ display: 'flex', gap: 8 }}>
+            {[
+              { label: kalshiDisplay.awayAbbr, team: kalshiDisplay.awayName, p: kalshiDisplay.away, side: 'away' },
+              { label: kalshiDisplay.homeAbbr, team: kalshiDisplay.homeName, p: kalshiDisplay.home, side: 'home' },
+            ].map(({ label, team, p, side }) => (
+              <div key={side} style={{
+                flex: 1, background: '#0f172a', borderRadius: 10, padding: '10px 12px',
+                border: `1px solid ${kalshiLive ? '#22c55e33' : '#1e293b'}`,
+              }}>
+                <div style={{ fontSize: 11, color: '#94a3b8', fontWeight: 700, marginBottom: 6 }}>
+                  {label} <span style={{ fontWeight: 400, color: '#475569' }}>YES</span>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+                  <div>
+                    <div style={{ fontSize: 10, color: '#475569', marginBottom: 2 }}>BID</div>
+                    <div style={{ fontSize: 18, fontWeight: 800, color: '#3b82f6' }}>
+                      {p.bid > 0 ? `${Math.round(p.bid * 100)}¢` : '—'}
+                    </div>
+                  </div>
+                  <div style={{ textAlign: 'center' }}>
+                    <div style={{ fontSize: 10, color: '#475569', marginBottom: 2 }}>ASK</div>
+                    <div style={{ fontSize: 18, fontWeight: 800, color: '#ef4444' }}>
+                      {p.ask > 0 ? `${Math.round(p.ask * 100)}¢` : '—'}
+                    </div>
+                  </div>
+                  <div style={{ textAlign: 'right' }}>
+                    <div style={{ fontSize: 10, color: '#475569', marginBottom: 2 }}>LAST</div>
+                    <div style={{ fontSize: 14, color: '#94a3b8' }}>
+                      {p.last > 0 ? `${Math.round(p.last * 100)}¢` : '—'}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
         </div>
+      ) : (
+        <div style={{ display: 'flex', gap: 10, marginBottom: 16, alignItems: 'flex-end' }}>
+          <div style={{ flex: 1 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+              <label style={{ ...labelStyle, marginBottom: 0 }}>Kalshi Price (yes %)</label>
+              {kalshiLive
+                ? <span style={{ fontSize: 10, color: '#22c55e', fontWeight: 700, letterSpacing: '0.05em' }}>● LIVE</span>
+                : mode === 'auto' && selectedGame
+                  ? <span style={{ fontSize: 10, color: '#475569', fontWeight: 600 }}>connecting…</span>
+                  : null
+              }
+            </div>
+            <input
+              value={kalshiInput}
+              onChange={e => { setKalshiInput(e.target.value); kalshiOverrideRef.current = null }}
+              onBlur={calculate}
+              placeholder="e.g. 48"
+              type="number"
+              style={{
+                width: '100%', padding: '10px 12px', borderRadius: 8,
+                background: '#1e293b',
+                border: `1px solid ${kalshiLive ? '#22c55e55' : '#334155'}`,
+                color: '#f1f5f9', fontSize: 15, outline: 'none', boxSizing: 'border-box',
+              }}
+            />
+          </div>
+        </div>
+      )}
         {edge != null && (
           <div style={{ textAlign: 'center', minWidth: 80 }}>
             <div style={{ fontSize: 11, color: '#94a3b8', textTransform: 'uppercase', marginBottom: 4 }}>Edge</div>
