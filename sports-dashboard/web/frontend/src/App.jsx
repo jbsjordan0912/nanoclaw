@@ -1311,17 +1311,29 @@ function Scorebug({ gameState, awayAsk, homeAsk }) {
 }
 
 // ── WPA Outcome Table (anchored to Kalshi price) ─────────────────────────────
-function WPATable({ wpData, battingTeam }) {
+function WPATable({ wpData, battingTeam, kalshiAsk }) {
   if (!wpData?.outcomes) return null
+
+  // Use Kalshi ask as the anchor. WPA shifts are relative — apply them to Kalshi price.
+  const baseWp = wpData.adjusted_wp ?? wpData.base_wp
+  const anchor = kalshiAsk || baseWp  // Kalshi ask (0-1) or fall back to model
 
   return (
     <div style={{ background: '#1e293b', borderRadius: 12, padding: 14, marginBottom: 12, border: '1px solid #334155' }}>
-      <div style={{ fontSize: 11, color: '#94a3b8', fontWeight: 700, textTransform: 'uppercase', marginBottom: 8, letterSpacing: '0.05em' }}>
-        If {battingTeam || 'batter'}...
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+        <div style={{ fontSize: 11, color: '#94a3b8', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+          If {battingTeam || 'batter'}...
+        </div>
+        {kalshiAsk && (
+          <div style={{ fontSize: 11, color: '#475569' }}>
+            now {Math.round(kalshiAsk * 100)}¢
+          </div>
+        )}
       </div>
       {wpData.outcomes.map((o, i) => {
         const shift = o.wpa
-        const shiftPct = (shift * 100).toFixed(1)
+        const shiftCents = Math.round(shift * 100)
+        const projected = Math.round(anchor * 100) + shiftCents
         const isPositive = shift > 0
         const isBig = Math.abs(shift) >= 0.05
         const color = isPositive ? '#22c55e' : '#ef4444'
@@ -1338,10 +1350,10 @@ function WPATable({ wpData, battingTeam }) {
             </span>
             <div style={{ textAlign: 'right' }}>
               <span style={{ fontSize: 14, fontWeight: 700, color }}>
-                {isPositive ? '+' : ''}{shiftPct}%
+                {isPositive ? '+' : ''}{shiftCents}¢
               </span>
               <span style={{ fontSize: 11, color: '#475569', marginLeft: 6 }}>
-                → {(o.new_wp * 100).toFixed(0)}¢
+                → {Math.max(0, Math.min(100, projected))}¢
               </span>
             </div>
           </div>
@@ -1471,6 +1483,13 @@ function PlakataTab() {
     ? (gameState.topbot === 'Top' ? gameState.away_team : gameState.home_team)?.split(' ').pop()
     : null
 
+  // Batting team's raw Kalshi ask (0-1) for WPA anchoring
+  const battingKalshiAsk = gameState
+    ? (gameState.topbot === 'Top'
+        ? wsPrices[gameData?.away?.abbr]?.ask
+        : wsPrices[gameData?.home?.abbr]?.ask) || null
+    : null
+
   return (
     <div style={{ animation: 'fadeIn 0.3s ease' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
@@ -1510,7 +1529,7 @@ function PlakataTab() {
       <Scorebug gameState={gameState} awayAsk={awayAsk} homeAsk={homeAsk} />
 
       {/* WPA Outcome Table */}
-      <WPATable wpData={wpData} battingTeam={battingTeam} />
+      <WPATable wpData={wpData} battingTeam={battingTeam} kalshiAsk={battingKalshiAsk} />
 
       {/* Orderbooks */}
       {gameData?.away && (
