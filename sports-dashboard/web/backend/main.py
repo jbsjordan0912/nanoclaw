@@ -277,22 +277,31 @@ async def games_today():
 async def game_state(game_pk: int):
     """Return full live game state for a game — for auto-mode polling."""
     import httpx
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        r = await client.get(f"https://statsapi.mlb.com/api/v1.1/game/{game_pk}/feed/live")
-    if r.status_code != 200:
-        raise HTTPException(404, "Game not found")
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(f"https://statsapi.mlb.com/api/v1.1/game/{game_pk}/feed/live")
+        if r.status_code != 200:
+            return {"error": "Game not found", "status": "Unknown"}
 
-    data    = r.json()
-    ls      = data["liveData"]["linescore"]
-    gd      = data["gameData"]
-    bx      = data["liveData"]["boxscore"]
+        data    = r.json()
+        ls      = data.get("liveData", {}).get("linescore", {})
+        gd      = data.get("gameData", {})
+        bx      = data.get("liveData", {}).get("boxscore", {})
 
-    inning_half = ls.get("inningHalf", "Top")
-    topbot      = "Bot" if inning_half == "Bottom" else "Top"
-    is_top      = topbot == "Top"
+        status = gd.get("status", {}).get("abstractGameState", "Preview")
+        if status == "Preview":
+            return {
+                "game_pk": game_pk, "status": "Preview",
+                "away_team": gd.get("teams", {}).get("away", {}).get("name", "?"),
+                "home_team": gd.get("teams", {}).get("home", {}).get("name", "?"),
+            }
 
-    away_runs = ls["teams"]["away"]["runs"]
-    home_runs = ls["teams"]["home"]["runs"]
+        inning_half = ls.get("inningHalf", "Top")
+        topbot      = "Bot" if inning_half == "Bottom" else "Top"
+        is_top      = topbot == "Top"
+
+        away_runs = ls.get("teams", {}).get("away", {}).get("runs", 0)
+        home_runs = ls.get("teams", {}).get("home", {}).get("runs", 0)
     bat_score = away_runs if is_top else home_runs
     fld_score = home_runs if is_top else away_runs
 
@@ -341,6 +350,8 @@ async def game_state(game_pk: int):
             "name": offense.get("batter", {}).get("fullName"),
         },
     }
+    except Exception as e:
+        return {"error": str(e), "status": "Unknown"}
 
 
 # ---------------------------------------------------------------------------
