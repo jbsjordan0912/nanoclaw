@@ -630,9 +630,7 @@ async def auth_trade(body: TradeAuthRequest):
         return {"ok": False, "error": "Trading not configured"}
     if body.password == TRADE_PASSWORD:
         # Simple token — hash of password + date so it changes daily
-        # Token valid for 4-hour window
-        window = datetime.now(timezone.utc).strftime('%Y-%m-%d') + str(datetime.now(timezone.utc).hour // 4)
-        token = hashlib.sha256(f"{TRADE_PASSWORD}:{window}".encode()).hexdigest()[:32]
+        token = hashlib.sha256(f"{TRADE_PASSWORD}:{datetime.now(timezone.utc).strftime('%Y-%m-%d')}".encode()).hexdigest()[:32]
         return {"ok": True, "token": token}
     return {"ok": False, "error": "Wrong password"}
 
@@ -641,15 +639,7 @@ def _verify_trade_token(token: str) -> bool:
     """Verify a trading token."""
     if not TRADE_PASSWORD or not token:
         return False
-    # Accept current and previous 4-hour window (so token doesn't die mid-session)
-    now = datetime.now(timezone.utc)
-    for offset in (0, -1):
-        adj = now + timedelta(hours=offset * 4)
-        window = adj.strftime('%Y-%m-%d') + str(adj.hour // 4)
-        expected = hashlib.sha256(f"{TRADE_PASSWORD}:{window}".encode()).hexdigest()[:32]
-        if token == expected:
-            return True
-    return False
+    expected = hashlib.sha256(f"{TRADE_PASSWORD}:{datetime.now(timezone.utc).strftime('%Y-%m-%d')}".encode()).hexdigest()[:32]
     return token == expected
 
 

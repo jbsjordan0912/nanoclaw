@@ -1553,35 +1553,24 @@ function PlakataTab() {
     setWsPrices({})
     if (!gameData?.game_key) return
 
-    let reconnectTimer = null
-    const connect = () => {
-      const ws = new WebSocket(getKalshiWsUrl({ gameKey: gameData.game_key }))
-      wsRef.current = ws
+    const ws = new WebSocket(getKalshiWsUrl({ gameKey: gameData.game_key }))
+    wsRef.current = ws
 
-      ws.onmessage = (e) => {
-        const data = JSON.parse(e.data)
-        if (data.status === 'connected') {
-          setWsConnected(true)
-        } else if (data.type === 'price') {
-          setWsPrices(prev => ({
-            ...prev,
-            [data.team]: { bid: data.yes_bid, ask: data.yes_ask, last: data.last_price },
-          }))
-        }
+    ws.onmessage = (e) => {
+      const data = JSON.parse(e.data)
+      if (data.status === 'connected') {
+        setWsConnected(true)
+      } else if (data.type === 'price') {
+        setWsPrices(prev => ({
+          ...prev,
+          [data.team]: { bid: data.yes_bid, ask: data.yes_ask, last: data.last_price },
+        }))
       }
-      ws.onclose = () => {
-        setWsConnected(false)
-        // Auto-reconnect after 3s
-        reconnectTimer = setTimeout(connect, 3000)
-      }
-      ws.onerror = () => { ws.close() }
     }
-    connect()
+    ws.onclose = () => setWsConnected(false)
+    ws.onerror = () => setWsConnected(false)
 
-    return () => {
-      if (reconnectTimer) clearTimeout(reconnectTimer)
-      if (wsRef.current) wsRef.current.close()
-    }
+    return () => { ws.close() }
   }, [gameData])
 
   // Derive ask prices for scorebug
