@@ -331,7 +331,7 @@ async def matchup_roster(team_id: int):
 async def batter_vs_pitcher(batter_id: int, pitcher_id: int):
     """Get batter vs pitcher historical stats from Statcast data."""
     result = _supabase.table("mlb_pitches")\
-        .select("events,launch_speed,launch_angle,pitch_type,pitch_name,description,bb_type,hit_distance_sc")\
+        .select("events,launch_speed,launch_angle,pitch_type,pitch_name,description,bb_type,hit_distance_sc,stand")\
         .eq("batter", batter_id)\
         .eq("pitcher", pitcher_id)\
         .execute()
@@ -339,7 +339,10 @@ async def batter_vs_pitcher(batter_id: int, pitcher_id: int):
     pitches = result.data
     if not pitches:
         return {"pa": 0, "ab": 0, "hits": 0, "hr": 0, "k": 0, "bb": 0,
-                "avg": None, "slg": None, "pitches_seen": 0, "pitch_types": {}}
+                "avg": None, "slg": None, "pitches_seen": 0, "pitch_types": {}, "stand": None}
+
+    # Get batter stance
+    stand = next((p.get("stand") for p in pitches if p.get("stand")), None)
 
     # Count plate appearances and outcomes
     pa = 0
@@ -412,6 +415,7 @@ async def batter_vs_pitcher(batter_id: int, pitcher_id: int):
         "avg_ev": avg_ev, "avg_la": avg_la,
         "pitches_seen": len(pitches),
         "pitch_types": pitch_types,
+        "stand": stand,
     }
 
 
@@ -446,10 +450,11 @@ async def team_vs_pitcher(team_id: int, pitcher_id: int):
 
 
 @app.get("/api/matchups/pitch-mix/{pitcher_id}")
-async def pitcher_pitch_mix(pitcher_id: int, period: str = "2026"):
+async def pitcher_pitch_mix(pitcher_id: int, period: str = "2026", batter_hand: str = ""):
     """
     Get a pitcher's pitch mix breakdown.
     period: "2026", "2025", "2024", "last10", "last5", "last3"
+    batter_hand: "" (all), "L", or "R"
     """
     # Determine filter
     if period.startswith("last"):
@@ -473,23 +478,30 @@ async def pitcher_pitch_mix(pitcher_id: int, period: str = "2026"):
         if not game_pks:
             return {"pitches": 0, "mix": [], "period": period}
         # Fetch all pitches from those games
-        result = _supabase.table("mlb_pitches")\
-            .select("pitch_name,pitch_type,description,release_speed,plate_x,plate_z,events,launch_speed,launch_angle")\
+        query = _supabase.table("mlb_pitches")\
+            .select("pitch_name,pitch_type,description,release_speed,plate_x,plate_z,events,launch_speed,launch_angle,stand,p_throws")\
             .eq("pitcher", pitcher_id)\
-            .in_("game_pk", game_pks)\
-            .execute()
+            .in_("game_pk", game_pks)
+        if batter_hand:
+            query = query.eq("stand", batter_hand)
+        result = query.execute()
     else:
         # Season filter
         year = int(period)
-        result = _supabase.table("mlb_pitches")\
-            .select("pitch_name,pitch_type,description,release_speed,plate_x,plate_z,events,launch_speed,launch_angle")\
+        query = _supabase.table("mlb_pitches")\
+            .select("pitch_name,pitch_type,description,release_speed,plate_x,plate_z,events,launch_speed,launch_angle,stand,p_throws")\
             .eq("pitcher", pitcher_id)\
-            .eq("game_year", year)\
-            .execute()
+            .eq("game_year", year)
+        if batter_hand:
+            query = query.eq("stand", batter_hand)
+        result = query.execute()
 
     pitches = result.data
     if not pitches:
-        return {"pitches": 0, "mix": [], "period": period}
+        return {"pitches": 0, "mix": [], "period": period, "throws": None}
+
+    # Get pitcher handedness from first pitch
+    throws = next((p.get("p_throws") for p in pitches if p.get("p_throws")), None)
 
     # Aggregate by pitch type
     types = {}
@@ -546,7 +558,7 @@ async def pitcher_pitch_mix(pitcher_id: int, period: str = "2026"):
             "avg_ev_against": avg_ev,
         })
 
-    return {"pitches": total, "mix": mix, "period": period}
+    return {"pitches": total, "mix": mix, "period": period, "throws": throws}
 
 
 @app.get("/api/games/{game_pk}/state")

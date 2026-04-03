@@ -1905,6 +1905,11 @@ function BvPCard({ batter, compact }) {
         <div>
           <span style={{ fontSize: 13, fontWeight: 700, color: '#e2e8f0' }}>{batter.batter_name}</span>
           <span style={{ fontSize: 10, color: '#475569', marginLeft: 6 }}>{batter.position}</span>
+          {batter.stand && (
+            <span style={{ fontSize: 9, color: '#64748b', marginLeft: 4, padding: '0 4px', borderRadius: 3, background: '#0f172a' }}>
+              {batter.stand}HB
+            </span>
+          )}
         </div>
         <div style={{ fontSize: 18, fontWeight: 900, color: avgColor }}>
           {batter.avg != null ? batter.avg.toFixed(3) : '—'}
@@ -1939,6 +1944,7 @@ function ResearchTab() {
   const [pitchMix, setPitchMix] = useState(null)
   const [mixPeriod, setMixPeriod] = useState('2026')
   const [mixLoading, setMixLoading] = useState(false)
+  const [mixHand, setMixHand] = useState('')  // '', 'L', or 'R'
 
   // Load today's matchups
   useEffect(() => {
@@ -1980,12 +1986,13 @@ function ResearchTab() {
     if (!pitcherId) { setPitchMix(null); return }
 
     setMixLoading(true)
-    fetch(`${API}/api/matchups/pitch-mix/${pitcherId}?period=${mixPeriod}`)
+    const handParam = mixHand ? `&batter_hand=${mixHand}` : ''
+    fetch(`${API}/api/matchups/pitch-mix/${pitcherId}?period=${mixPeriod}${handParam}`)
       .then(r => r.json())
       .then(setPitchMix)
       .catch(() => setPitchMix(null))
       .finally(() => setMixLoading(false))
-  }, [selectedGame, viewSide, selectedPitcher, mixPeriod, games])
+  }, [selectedGame, viewSide, selectedPitcher, mixPeriod, mixHand, games])
 
   const game = games.find(g => g.game_pk === selectedGame)
   const currentPitcherName = selectedPitcher
@@ -2001,7 +2008,7 @@ function ResearchTab() {
       {/* Game picker */}
       <select
         value={selectedGame || ''}
-        onChange={e => { setSelectedGame(e.target.value ? Number(e.target.value) : null); setSelectedPitcher(null); setRoster(null); setPitchMix(null); setMixPeriod('2026') }}
+        onChange={e => { setSelectedGame(e.target.value ? Number(e.target.value) : null); setSelectedPitcher(null); setRoster(null); setPitchMix(null); setMixPeriod('2026'); setMixHand('') }}
         style={{
           width: '100%', padding: '10px 12px', borderRadius: 8,
           background: '#1e293b', border: '1px solid #334155',
@@ -2070,8 +2077,15 @@ function ResearchTab() {
       {/* Pitch mix */}
       {game && (
         <div style={{ background: '#1e293b', borderRadius: 10, padding: 12, marginBottom: 12, border: '1px solid #334155' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-            <div style={{ fontSize: 11, color: '#94a3b8', fontWeight: 700, textTransform: 'uppercase' }}>Pitch Mix</div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ fontSize: 11, color: '#94a3b8', fontWeight: 700, textTransform: 'uppercase' }}>Pitch Mix</span>
+              {pitchMix?.throws && (
+                <span style={{ fontSize: 10, padding: '1px 6px', borderRadius: 4, background: '#0f172a', color: '#64748b', fontWeight: 600 }}>
+                  {pitchMix.throws}HP
+                </span>
+              )}
+            </div>
             <div style={{ display: 'flex', gap: 4 }}>
               {[
                 { value: '2026', label: '2026' },
@@ -2087,6 +2101,20 @@ function ResearchTab() {
                 }}>{opt.label}</button>
               ))}
             </div>
+          </div>
+          {/* Batter hand filter */}
+          <div style={{ display: 'flex', gap: 4, marginBottom: 8 }}>
+            {[
+              { value: '', label: 'All Batters' },
+              { value: 'L', label: 'vs LHB' },
+              { value: 'R', label: 'vs RHB' },
+            ].map(opt => (
+              <button key={opt.value} onClick={() => setMixHand(opt.value)} style={{
+                padding: '3px 10px', borderRadius: 5, border: 'none', fontSize: 10, fontWeight: 600,
+                background: mixHand === opt.value ? '#334155' : '#0f172a',
+                color: mixHand === opt.value ? '#e2e8f0' : '#475569', cursor: 'pointer',
+              }}>{opt.label}</button>
+            ))}
           </div>
 
           {mixLoading && <div style={{ fontSize: 11, color: '#475569', textAlign: 'center', padding: 8 }}>Loading...</div>}
