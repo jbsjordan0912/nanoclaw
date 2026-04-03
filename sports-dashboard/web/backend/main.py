@@ -274,6 +274,177 @@ async def games_today():
     return games
 
 
+# ---------------------------------------------------------------------------
+# Matchup research
+# ---------------------------------------------------------------------------
+
+@app.get("/api/matchups/today")
+async def matchups_today():
+    """Get today's games with probable pitchers and active rosters."""
+    import httpx
+    today_str = (datetime.now(timezone.utc) - timedelta(hours=4)).strftime("%Y-%m-%d")
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        # Get schedule with probable pitchers
+        r = await client.get(f"{MLB_API}/schedule", params={
+            "sportId": 1, "date": today_str, "hydrate": "probablePitcher",
+        })
+        games = []
+        for d in r.json().get("dates", []):
+            for g in d.get("games", []):
+                away = g["teams"]["away"]
+                home = g["teams"]["home"]
+                ap = away.get("probablePitcher", {})
+                hp = home.get("probablePitcher", {})
+                games.append({
+                    "game_pk": g["gamePk"],
+                    "away_team": away["team"]["name"],
+                    "home_team": home["team"]["name"],
+                    "away_team_id": away["team"]["id"],
+                    "home_team_id": home["team"]["id"],
+                    "away_starter": {"id": ap.get("id"), "name": ap.get("fullName", "TBD")},
+                    "home_starter": {"id": hp.get("id"), "name": hp.get("fullName", "TBD")},
+                    "status": g["status"]["abstractGameState"],
+                    "game_time": g.get("gameDate"),
+                })
+    return games
+
+
+@app.get("/api/matchups/roster/{team_id}")
+async def matchup_roster(team_id: int):
+    """Get active roster for a team split by pitchers and hitters."""
+    import httpx
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        r = await client.get(f"{MLB_API}/teams/{team_id}/roster", params={
+            "rosterType": "active", "season": 2026,
+        })
+    roster = r.json().get("roster", [])
+    pitchers = [{"id": p["person"]["id"], "name": p["person"]["fullName"]}
+                for p in roster if p.get("position", {}).get("abbreviation") == "P"]
+    hitters = [{"id": p["person"]["id"], "name": p["person"]["fullName"],
+                "position": p.get("position", {}).get("abbreviation", "?")}
+               for p in roster if p.get("position", {}).get("abbreviation") != "P"]
+    return {"pitchers": pitchers, "hitters": hitters}
+
+
+@app.get("/api/matchups/bvp")
+async def batter_vs_pitcher(batter_id: int, pitcher_id: int):
+    """Get batter vs pitcher historical stats from Statcast data."""
+    result = _supabase.table("mlb_pitches")\
+        .select("events,launch_speed,launch_angle,pitch_type,pitch_name,description,bb_type,hit_distance_sc")\
+        .eq("batter", batter_id)\
+        .eq("pitcher", pitcher_id)\
+        .execute()
+
+    pitches = result.data
+    if not pitches:
+        return {"pa": 0, "ab": 0, "hits": 0, "hr": 0, "k": 0, "bb": 0,
+                "avg": None, "slg": None, "pitches_seen": 0, "pitch_types": {}}
+
+    # Count plate appearances and outcomes
+    pa = 0
+    ab = 0
+    hits = 0
+    singles = 0
+    doubles = 0
+    triples = 0
+    hr = 0
+    k = 0
+    bb = 0
+    hbp = 0
+    evs = []
+    las = []
+    pitch_types = {}
+
+    seen_events = set()
+    for p in pitches:
+        # Count pitch types
+        pt = p.get("pitch_name") or p.get("pitch_type") or "Unknown"
+        pitch_types[pt] = pitch_types.get(pt, 0) + 1
+
+        event = p.get("events")
+        if not event:
+            continue
+
+        pa += 1
+        if event == "walk":
+            bb += 1
+        elif event == "hit_by_pitch":
+            hbp += 1
+        elif event == "strikeout":
+            k += 1
+            ab += 1
+        elif event == "sac_fly" or event == "sac_bunt":
+            pass  # not an AB
+        else:
+            ab += 1
+            if event == "single":
+                hits += 1
+                singles += 1
+            elif event == "double":
+                hits += 1
+                doubles += 1
+            elif event == "triple":
+                hits += 1
+                triples += 1
+            elif event == "home_run":
+                hits += 1
+                hr += 1
+
+        ev = p.get("launch_speed")
+        la = p.get("launch_angle")
+        if ev is not None:
+            evs.append(ev)
+        if la is not None:
+            las.append(la)
+
+    avg = round(hits / ab, 3) if ab > 0 else None
+    total_bases = singles + doubles * 2 + triples * 3 + hr * 4
+    slg = round(total_bases / ab, 3) if ab > 0 else None
+    obp = round((hits + bb + hbp) / pa, 3) if pa > 0 else None
+    avg_ev = round(sum(evs) / len(evs), 1) if evs else None
+    avg_la = round(sum(las) / len(las), 1) if las else None
+
+    return {
+        "pa": pa, "ab": ab, "hits": hits, "hr": hr, "k": k, "bb": bb,
+        "singles": singles, "doubles": doubles, "triples": triples,
+        "avg": avg, "slg": slg, "obp": obp,
+        "avg_ev": avg_ev, "avg_la": avg_la,
+        "pitches_seen": len(pitches),
+        "pitch_types": pitch_types,
+    }
+
+
+@app.get("/api/matchups/team-vs-pitcher")
+async def team_vs_pitcher(team_id: int, pitcher_id: int):
+    """Get all hitters on a team's active roster and their stats vs a specific pitcher."""
+    import httpx
+    # Get roster
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        r = await client.get(f"{MLB_API}/teams/{team_id}/roster", params={
+            "rosterType": "active", "season": 2026,
+        })
+    roster = r.json().get("roster", [])
+    hitters = [{"id": p["person"]["id"], "name": p["person"]["fullName"],
+                "position": p.get("position", {}).get("abbreviation", "?")}
+               for p in roster if p.get("position", {}).get("abbreviation") != "P"]
+
+    # Get BvP for each hitter
+    results = []
+    for h in hitters:
+        bvp = await batter_vs_pitcher(h["id"], pitcher_id)
+        results.append({
+            "batter_id": h["id"],
+            "batter_name": h["name"],
+            "position": h["position"],
+            **bvp,
+        })
+
+    # Sort by PA descending
+    results.sort(key=lambda x: x["pa"], reverse=True)
+    return results
+
+
 @app.get("/api/games/{game_pk}/state")
 async def game_state(game_pk: int):
     """Return full live game state for a game — for auto-mode polling."""

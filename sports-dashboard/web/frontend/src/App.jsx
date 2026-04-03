@@ -1881,6 +1881,198 @@ function PlakataTab() {
   )
 }
 
+// ── Research Tab ─────────────────────────────────────────────────────────────
+function BvPCard({ batter, compact }) {
+  if (batter.pa === 0) {
+    if (compact) return null
+    return (
+      <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', fontSize: 12, color: '#334155' }}>
+        <span>{batter.batter_name} ({batter.position})</span>
+        <span>No history</span>
+      </div>
+    )
+  }
+
+  const avgColor = batter.avg >= 0.300 ? '#22c55e' : batter.avg >= 0.200 ? '#f59e0b' : '#ef4444'
+  const evColor = batter.avg_ev >= 92 ? '#22c55e' : batter.avg_ev >= 86 ? '#f59e0b' : '#94a3b8'
+
+  return (
+    <div style={{
+      background: '#0f172a', borderRadius: 8, padding: '8px 10px', marginBottom: 4,
+      border: `1px solid ${batter.avg >= 0.300 ? '#22c55e22' : '#1e293b'}`,
+    }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+        <div>
+          <span style={{ fontSize: 13, fontWeight: 700, color: '#e2e8f0' }}>{batter.batter_name}</span>
+          <span style={{ fontSize: 10, color: '#475569', marginLeft: 6 }}>{batter.position}</span>
+        </div>
+        <div style={{ fontSize: 18, fontWeight: 900, color: avgColor }}>
+          {batter.avg != null ? batter.avg.toFixed(3) : '—'}
+        </div>
+      </div>
+      <div style={{ display: 'flex', gap: 12, fontSize: 11, color: '#94a3b8' }}>
+        <span>{batter.pa} PA</span>
+        <span>{batter.ab} AB</span>
+        <span>{batter.hits} H</span>
+        <span style={{ color: batter.hr > 0 ? '#f59e0b' : '#475569' }}>{batter.hr} HR</span>
+        <span>{batter.k} K</span>
+        <span>{batter.bb} BB</span>
+        <span>SLG {batter.slg != null ? batter.slg.toFixed(3) : '—'}</span>
+      </div>
+      {batter.avg_ev != null && (
+        <div style={{ display: 'flex', gap: 12, fontSize: 10, color: '#475569', marginTop: 2 }}>
+          <span style={{ color: evColor }}>EV {batter.avg_ev}</span>
+          <span>LA {batter.avg_la}°</span>
+          <span>{batter.pitches_seen} pitches seen</span>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function ResearchTab() {
+  const [games, setGames] = useState([])
+  const [selectedGame, setSelectedGame] = useState(null)
+  const [viewSide, setViewSide] = useState('away') // which lineup to show
+  const [matchups, setMatchups] = useState(null)
+  const [loading, setLoading] = useState(false)
+  const [selectedPitcher, setSelectedPitcher] = useState(null) // override pitcher (for bullpen)
+  const [roster, setRoster] = useState(null) // opposing team's pitching roster
+
+  // Load today's matchups
+  useEffect(() => {
+    fetch(`${API}/api/matchups/today`).then(r => r.json()).then(setGames).catch(() => {})
+  }, [])
+
+  // When game + side selected, load matchups vs starter
+  useEffect(() => {
+    if (!selectedGame) { setMatchups(null); setRoster(null); setSelectedPitcher(null); return }
+    const g = games.find(gm => gm.game_pk === selectedGame)
+    if (!g) return
+
+    const battingTeamId = viewSide === 'away' ? g.away_team_id : g.home_team_id
+    const pitcherId = selectedPitcher
+      || (viewSide === 'away' ? g.home_starter?.id : g.away_starter?.id)
+    const opposingTeamId = viewSide === 'away' ? g.home_team_id : g.away_team_id
+
+    if (!pitcherId) return
+
+    setLoading(true)
+    Promise.all([
+      fetch(`${API}/api/matchups/team-vs-pitcher?team_id=${battingTeamId}&pitcher_id=${pitcherId}`).then(r => r.json()),
+      roster ? Promise.resolve(roster) : fetch(`${API}/api/matchups/roster/${opposingTeamId}`).then(r => r.json()),
+    ])
+      .then(([m, r]) => {
+        setMatchups(m)
+        if (!roster) setRoster(r)
+      })
+      .catch(() => {})
+      .finally(() => setLoading(false))
+  }, [selectedGame, viewSide, selectedPitcher, games])
+
+  const game = games.find(g => g.game_pk === selectedGame)
+  const currentPitcherName = selectedPitcher
+    ? roster?.pitchers?.find(p => p.id === selectedPitcher)?.name || 'Unknown'
+    : (viewSide === 'away' ? game?.home_starter?.name : game?.away_starter?.name) || 'TBD'
+
+  return (
+    <div style={{ animation: 'fadeIn 0.3s ease' }}>
+      <div style={{ fontSize: 13, fontWeight: 700, color: '#94a3b8', marginBottom: 14 }}>
+        MATCHUP RESEARCH
+      </div>
+
+      {/* Game picker */}
+      <select
+        value={selectedGame || ''}
+        onChange={e => { setSelectedGame(e.target.value ? Number(e.target.value) : null); setSelectedPitcher(null); setRoster(null) }}
+        style={{
+          width: '100%', padding: '10px 12px', borderRadius: 8,
+          background: '#1e293b', border: '1px solid #334155',
+          color: '#f1f5f9', fontSize: 13, marginBottom: 10, outline: 'none',
+        }}
+      >
+        <option value="">Select a game...</option>
+        {games.map(g => (
+          <option key={g.game_pk} value={g.game_pk}>
+            {g.away_team} @ {g.home_team} — {g.away_starter.name} vs {g.home_starter.name}
+          </option>
+        ))}
+      </select>
+
+      {/* Side toggle + pitcher selector */}
+      {game && (
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
+            {['away', 'home'].map(side => (
+              <button key={side} onClick={() => { setViewSide(side); setSelectedPitcher(null) }} style={{
+                flex: 1, padding: '8px 0', borderRadius: 8, border: 'none', fontSize: 12, fontWeight: 700,
+                background: viewSide === side ? '#2563eb' : '#1e293b',
+                color: viewSide === side ? '#fff' : '#64748b', cursor: 'pointer',
+              }}>
+                {side === 'away' ? `${game.away_team} Hitting` : `${game.home_team} Hitting`}
+              </button>
+            ))}
+          </div>
+
+          {/* Current pitcher */}
+          <div style={{
+            background: '#1e293b', borderRadius: 10, padding: '8px 12px', marginBottom: 8,
+            border: '1px solid #334155', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+          }}>
+            <div>
+              <div style={{ fontSize: 10, color: '#475569' }}>VS PITCHER</div>
+              <div style={{ fontSize: 15, fontWeight: 800, color: '#e2e8f0' }}>{currentPitcherName}</div>
+            </div>
+            {selectedPitcher && (
+              <button onClick={() => setSelectedPitcher(null)} style={{
+                padding: '4px 10px', borderRadius: 6, border: '1px solid #334155',
+                background: 'transparent', color: '#94a3b8', fontSize: 10, cursor: 'pointer',
+              }}>Back to Starter</button>
+            )}
+          </div>
+
+          {/* Bullpen picker */}
+          {roster?.pitchers && (
+            <div style={{ marginBottom: 8 }}>
+              <div style={{ fontSize: 10, color: '#475569', marginBottom: 4, textTransform: 'uppercase' }}>Bullpen</div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                {roster.pitchers.map(p => (
+                  <button key={p.id} onClick={() => setSelectedPitcher(p.id)} style={{
+                    padding: '4px 8px', borderRadius: 6, border: 'none', fontSize: 11,
+                    background: selectedPitcher === p.id ? '#2563eb' : '#0f172a',
+                    color: selectedPitcher === p.id ? '#fff' : '#94a3b8',
+                    cursor: 'pointer',
+                  }}>{p.name.split(' ').pop()}</button>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Matchup results */}
+      {loading && <div style={{ textAlign: 'center', color: '#475569', padding: 20 }}>Loading matchups...</div>}
+
+      {matchups && !loading && (
+        <div>
+          {matchups.map((b, i) => (
+            <BvPCard key={b.batter_id} batter={b} compact={false} />
+          ))}
+          {matchups.length === 0 && (
+            <div style={{ textAlign: 'center', color: '#475569', padding: 20 }}>No hitters on active roster</div>
+          )}
+        </div>
+      )}
+
+      {!selectedGame && (
+        <div style={{ textAlign: 'center', color: '#475569', padding: 40 }}>
+          Select a game to view batter vs pitcher matchups
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Shared styles ─────────────────────────────────────────────────────────────
 const labelStyle = { display: 'block', fontSize: 11, color: '#94a3b8', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.05em' }
 const nudgeBtn = {
@@ -1891,7 +2083,7 @@ const nudgeBtn = {
 
 // ── Root App ──────────────────────────────────────────────────────────────────
 export default function App() {
-  const [tab, setTab] = useState('wp')
+  const [tab, setTab] = useState('research')
 
   return (
     <div style={{ maxWidth: 480, margin: '0 auto', padding: '16px 16px 60px', fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif', color: '#f1f5f9', background: '#0f172a', minHeight: '100vh' }}>
@@ -1906,7 +2098,7 @@ export default function App() {
       {/* Tab switcher */}
       <div style={{ display: 'flex', borderRadius: 10, overflow: 'hidden', border: '1px solid #1e293b', marginBottom: 20, background: '#1e293b' }}>
         {[
-          { id: 'wp',       label: '📊 WP' },
+          { id: 'research', label: '🔍 Research' },
           { id: 'sim',      label: '⚾ Sim' },
           { id: 'plakata',  label: '💥 Plakata' },
           { id: 'spring',   label: '🌸 Odds' },
@@ -1920,7 +2112,7 @@ export default function App() {
         ))}
       </div>
 
-      {tab === 'wp' ? <WPDashboard /> : tab === 'sim' ? <AtBatTab /> : tab === 'plakata' ? <PlakataTab /> : <SpringOddsTab />}
+      {tab === 'research' ? <ResearchTab /> : tab === 'sim' ? <AtBatTab /> : tab === 'plakata' ? <PlakataTab /> : <SpringOddsTab />}
 
       <style>{`
         * { box-sizing: border-box; }
