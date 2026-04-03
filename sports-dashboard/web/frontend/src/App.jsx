@@ -1919,13 +1919,11 @@ function BvPCard({ batter, compact }) {
         <span>{batter.bb} BB</span>
         <span>SLG {batter.slg != null ? batter.slg.toFixed(3) : '—'}</span>
       </div>
-      {batter.avg_ev != null && (
-        <div style={{ display: 'flex', gap: 12, fontSize: 10, color: '#475569', marginTop: 2 }}>
-          <span style={{ color: evColor }}>EV {batter.avg_ev}</span>
-          <span>LA {batter.avg_la}°</span>
-          <span>{batter.pitches_seen} pitches seen</span>
-        </div>
-      )}
+      <div style={{ display: 'flex', gap: 12, fontSize: 10, color: '#475569', marginTop: 2 }}>
+        {batter.avg_ev != null && <span style={{ color: evColor }}>EV {batter.avg_ev}</span>}
+        {batter.avg_la != null && <span>LA {batter.avg_la}°</span>}
+        <span>{batter.pitches_seen} pitches seen</span>
+      </div>
     </div>
   )
 }
