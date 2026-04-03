@@ -1392,8 +1392,8 @@ function PlakataTab() {
   const [lockedTarget, setLockedTarget] = useState(null)  // cents — locked target price
   const [tradeLoading, setTradeLoading] = useState(false)
   const [tradeResult, setTradeResult] = useState(null)
-  const sliderRef = useRef(null)
   const sliderTrackRef = useRef(null)
+  const sliderXRef = useRef(0)
   const [sliderX, setSliderX] = useState(0)
   const [sliding, setSliding] = useState(false)
 
@@ -1424,6 +1424,7 @@ function PlakataTab() {
     const onMove = (ev) => {
       const x = (ev.touches?.[0] || ev).clientX
       const dx = Math.max(0, Math.min(x - startX, trackRect.width - 48))
+      sliderXRef.current = dx
       setSliderX(dx)
     }
     const onEnd = async (ev) => {
@@ -1433,7 +1434,7 @@ function PlakataTab() {
       document.removeEventListener('touchend', onEnd)
 
       const threshold = trackRect.width - 80
-      if (sliderX >= threshold && tradeUnlocked && lockedTarget && gameData && gameState) {
+      if (sliderXRef.current >= threshold && tradeUnlocked && lockedTarget && gameData && gameState) {
         // Execute trade
         const isTop = gameState.topbot === 'Top'
         const battingTicker = isTop ? gameData.away?.ticker : gameData.home?.ticker
