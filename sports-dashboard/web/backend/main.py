@@ -445,6 +445,110 @@ async def team_vs_pitcher(team_id: int, pitcher_id: int):
     return results
 
 
+@app.get("/api/matchups/pitch-mix/{pitcher_id}")
+async def pitcher_pitch_mix(pitcher_id: int, period: str = "2026"):
+    """
+    Get a pitcher's pitch mix breakdown.
+    period: "2026", "2025", "2024", "last10", "last5", "last3"
+    """
+    # Determine filter
+    if period.startswith("last"):
+        n_games = int(period.replace("last", ""))
+        # Get the pitcher's most recent game_pks
+        recent = _supabase.table("mlb_pitches")\
+            .select("game_pk,game_date")\
+            .eq("pitcher", pitcher_id)\
+            .order("game_date", desc=True)\
+            .limit(5000)\
+            .execute()
+        # Get unique game_pks in order
+        seen = set()
+        game_pks = []
+        for r in recent.data:
+            if r["game_pk"] not in seen:
+                seen.add(r["game_pk"])
+                game_pks.append(r["game_pk"])
+            if len(game_pks) >= n_games:
+                break
+        if not game_pks:
+            return {"pitches": 0, "mix": [], "period": period}
+        # Fetch all pitches from those games
+        result = _supabase.table("mlb_pitches")\
+            .select("pitch_name,pitch_type,description,release_speed,plate_x,plate_z,events,launch_speed,launch_angle")\
+            .eq("pitcher", pitcher_id)\
+            .in_("game_pk", game_pks)\
+            .execute()
+    else:
+        # Season filter
+        year = int(period)
+        result = _supabase.table("mlb_pitches")\
+            .select("pitch_name,pitch_type,description,release_speed,plate_x,plate_z,events,launch_speed,launch_angle")\
+            .eq("pitcher", pitcher_id)\
+            .eq("game_year", year)\
+            .execute()
+
+    pitches = result.data
+    if not pitches:
+        return {"pitches": 0, "mix": [], "period": period}
+
+    # Aggregate by pitch type
+    types = {}
+    for p in pitches:
+        name = p.get("pitch_name") or p.get("pitch_type") or "Unknown"
+        if name not in types:
+            types[name] = {
+                "count": 0, "speeds": [], "whiffs": 0, "swings": 0,
+                "called_strikes": 0, "balls": 0, "in_play": 0,
+                "hits": 0, "evs": [],
+            }
+        t = types[name]
+        t["count"] += 1
+        spd = p.get("release_speed")
+        if spd is not None:
+            t["speeds"].append(spd)
+
+        desc = p.get("description", "")
+        if desc in ("swinging_strike", "swinging_strike_blocked"):
+            t["whiffs"] += 1
+            t["swings"] += 1
+        elif desc in ("foul", "foul_tip", "foul_bunt"):
+            t["swings"] += 1
+        elif desc in ("hit_into_play", "hit_into_play_score", "hit_into_play_no_out"):
+            t["swings"] += 1
+            t["in_play"] += 1
+            ev = p.get("events")
+            if ev in ("single", "double", "triple", "home_run"):
+                t["hits"] += 1
+            evs = p.get("launch_speed")
+            if evs is not None:
+                t["evs"].append(evs)
+        elif desc == "called_strike":
+            t["called_strikes"] += 1
+        elif desc == "ball":
+            t["balls"] += 1
+
+    total = len(pitches)
+    mix = []
+    for name, t in sorted(types.items(), key=lambda x: -x[1]["count"]):
+        avg_velo = round(sum(t["speeds"]) / len(t["speeds"]), 1) if t["speeds"] else None
+        whiff_rate = round(t["whiffs"] / t["swings"] * 100, 1) if t["swings"] > 0 else None
+        avg_ev = round(sum(t["evs"]) / len(t["evs"]), 1) if t["evs"] else None
+        mix.append({
+            "name": name,
+            "count": t["count"],
+            "pct": round(t["count"] / total * 100, 1),
+            "avg_velo": avg_velo,
+            "whiff_rate": whiff_rate,
+            "called_strike_pct": round(t["called_strikes"] / t["count"] * 100, 1),
+            "ball_pct": round(t["balls"] / t["count"] * 100, 1),
+            "in_play": t["in_play"],
+            "hits": t["hits"],
+            "avg_ev_against": avg_ev,
+        })
+
+    return {"pitches": total, "mix": mix, "period": period}
+
+
 @app.get("/api/games/{game_pk}/state")
 async def game_state(game_pk: int):
     """Return full live game state for a game — for auto-mode polling."""

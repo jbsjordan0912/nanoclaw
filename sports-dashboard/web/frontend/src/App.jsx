@@ -1936,6 +1936,9 @@ function ResearchTab() {
   const [loading, setLoading] = useState(false)
   const [selectedPitcher, setSelectedPitcher] = useState(null) // override pitcher (for bullpen)
   const [roster, setRoster] = useState(null) // opposing team's pitching roster
+  const [pitchMix, setPitchMix] = useState(null)
+  const [mixPeriod, setMixPeriod] = useState('2026')
+  const [mixLoading, setMixLoading] = useState(false)
 
   // Load today's matchups
   useEffect(() => {
@@ -1968,6 +1971,22 @@ function ResearchTab() {
       .finally(() => setLoading(false))
   }, [selectedGame, viewSide, selectedPitcher, games])
 
+  // Fetch pitch mix when pitcher or period changes
+  useEffect(() => {
+    const g = games.find(gm => gm.game_pk === selectedGame)
+    if (!g) { setPitchMix(null); return }
+    const pitcherId = selectedPitcher
+      || (viewSide === 'away' ? g.home_starter?.id : g.away_starter?.id)
+    if (!pitcherId) { setPitchMix(null); return }
+
+    setMixLoading(true)
+    fetch(`${API}/api/matchups/pitch-mix/${pitcherId}?period=${mixPeriod}`)
+      .then(r => r.json())
+      .then(setPitchMix)
+      .catch(() => setPitchMix(null))
+      .finally(() => setMixLoading(false))
+  }, [selectedGame, viewSide, selectedPitcher, mixPeriod, games])
+
   const game = games.find(g => g.game_pk === selectedGame)
   const currentPitcherName = selectedPitcher
     ? roster?.pitchers?.find(p => p.id === selectedPitcher)?.name || 'Unknown'
@@ -1982,7 +2001,7 @@ function ResearchTab() {
       {/* Game picker */}
       <select
         value={selectedGame || ''}
-        onChange={e => { setSelectedGame(e.target.value ? Number(e.target.value) : null); setSelectedPitcher(null); setRoster(null) }}
+        onChange={e => { setSelectedGame(e.target.value ? Number(e.target.value) : null); setSelectedPitcher(null); setRoster(null); setPitchMix(null); setMixPeriod('2026') }}
         style={{
           width: '100%', padding: '10px 12px', borderRadius: 8,
           background: '#1e293b', border: '1px solid #334155',
@@ -2044,6 +2063,69 @@ function ResearchTab() {
                 ))}
               </div>
             </div>
+          )}
+        </div>
+      )}
+
+      {/* Pitch mix */}
+      {game && (
+        <div style={{ background: '#1e293b', borderRadius: 10, padding: 12, marginBottom: 12, border: '1px solid #334155' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+            <div style={{ fontSize: 11, color: '#94a3b8', fontWeight: 700, textTransform: 'uppercase' }}>Pitch Mix</div>
+            <div style={{ display: 'flex', gap: 4 }}>
+              {[
+                { value: '2026', label: '2026' },
+                { value: '2025', label: '2025' },
+                { value: 'last10', label: 'L10' },
+                { value: 'last5', label: 'L5' },
+                { value: 'last3', label: 'L3' },
+              ].map(opt => (
+                <button key={opt.value} onClick={() => setMixPeriod(opt.value)} style={{
+                  padding: '3px 8px', borderRadius: 5, border: 'none', fontSize: 10, fontWeight: 600,
+                  background: mixPeriod === opt.value ? '#2563eb' : '#0f172a',
+                  color: mixPeriod === opt.value ? '#fff' : '#64748b', cursor: 'pointer',
+                }}>{opt.label}</button>
+              ))}
+            </div>
+          </div>
+
+          {mixLoading && <div style={{ fontSize: 11, color: '#475569', textAlign: 'center', padding: 8 }}>Loading...</div>}
+
+          {pitchMix && !mixLoading && pitchMix.mix?.length > 0 && (
+            <div>
+              {/* Header */}
+              <div style={{ display: 'flex', padding: '0 4px 4px', fontSize: 9, color: '#475569', borderBottom: '1px solid #0f172a' }}>
+                <span style={{ flex: 2 }}>PITCH</span>
+                <span style={{ flex: 1, textAlign: 'right' }}>%</span>
+                <span style={{ flex: 1, textAlign: 'right' }}>VELO</span>
+                <span style={{ flex: 1, textAlign: 'right' }}>WHIFF</span>
+                <span style={{ flex: 1, textAlign: 'right' }}>CSP</span>
+              </div>
+              {pitchMix.mix.map((p, i) => (
+                <div key={i} style={{ display: 'flex', alignItems: 'center', padding: '4px', fontSize: 12 }}>
+                  <span style={{ flex: 2, color: '#e2e8f0', fontWeight: 600 }}>{p.name}</span>
+                  <span style={{ flex: 1, textAlign: 'right', color: '#94a3b8' }}>
+                    <span style={{ fontWeight: 700, color: p.pct >= 20 ? '#e2e8f0' : '#64748b' }}>{p.pct}%</span>
+                  </span>
+                  <span style={{ flex: 1, textAlign: 'right', color: '#94a3b8' }}>
+                    {p.avg_velo || '—'}
+                  </span>
+                  <span style={{ flex: 1, textAlign: 'right', color: p.whiff_rate >= 30 ? '#22c55e' : p.whiff_rate >= 20 ? '#f59e0b' : '#94a3b8' }}>
+                    {p.whiff_rate != null ? `${p.whiff_rate}%` : '—'}
+                  </span>
+                  <span style={{ flex: 1, textAlign: 'right', color: '#94a3b8' }}>
+                    {p.called_strike_pct}%
+                  </span>
+                </div>
+              ))}
+              <div style={{ fontSize: 10, color: '#334155', textAlign: 'right', marginTop: 4 }}>
+                {pitchMix.pitches} total pitches
+              </div>
+            </div>
+          )}
+
+          {pitchMix && !mixLoading && pitchMix.pitches === 0 && (
+            <div style={{ fontSize: 11, color: '#475569', textAlign: 'center', padding: 8 }}>No data for this period</div>
           )}
         </div>
       )}
