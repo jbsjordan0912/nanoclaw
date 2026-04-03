@@ -452,23 +452,9 @@ async def team_vs_pitcher(team_id: int, pitcher_id: int):
 
 @app.get("/api/matchups/pitcher-stats/{pitcher_id}")
 async def pitcher_stats(pitcher_id: int, season: int = 2025, batter_hand: str = ""):
-    """Get pitcher general stats: FanGraphs + computed from Statcast.
+    """Get pitcher stats computed from Statcast data.
     batter_hand: "" (all), "L", or "R"
     """
-    # FanGraphs stats (not split by hand — season level only)
-    fg = {}
-    for yr in [season, season - 1, season - 2]:
-        result = _supabase.table("mlb_pitcher_season_stats")\
-            .select("*")\
-            .eq("pitcher_id", pitcher_id)\
-            .eq("season", yr)\
-            .limit(1)\
-            .execute()
-        if result.data:
-            fg = result.data[0]
-            fg["_season"] = yr
-            break
-
     # Compute stats from Statcast pitch data
     query = _supabase.table("mlb_pitches")\
         .select("events,description,outs_when_up,inning,stand")\
@@ -535,18 +521,6 @@ async def pitcher_stats(pitcher_id: int, season: int = 2025, batter_hand: str = 
     return {
         "pitcher_id": pitcher_id,
         "season": season,
-        # FanGraphs
-        "era": fg.get("era"),
-        "fip": fg.get("fip"),
-        "war": fg.get("war"),
-        "stuff_plus": fg.get("stuff_plus"),
-        "location_plus": fg.get("location_plus"),
-        "pitching_plus": fg.get("pitching_plus"),
-        "fg_k_pct": fg.get("k_pct"),
-        "fg_bb_pct": fg.get("bb_pct"),
-        "fg_season": fg.get("_season"),
-        "fg_name": fg.get("name"),
-        "fg_team": fg.get("team"),
         # Computed from Statcast
         "pa": pa,
         "ip": ip,
