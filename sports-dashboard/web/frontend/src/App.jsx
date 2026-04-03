@@ -2004,7 +2004,7 @@ function ResearchTab() {
         <div style={{ marginBottom: 12 }}>
           <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
             {['away', 'home'].map(side => (
-              <button key={side} onClick={() => { setViewSide(side); setSelectedPitcher(null) }} style={{
+              <button key={side} onClick={() => { setViewSide(side); setSelectedPitcher(null); setRoster(null) }} style={{
                 flex: 1, padding: '8px 0', borderRadius: 8, border: 'none', fontSize: 12, fontWeight: 700,
                 background: viewSide === side ? '#2563eb' : '#1e293b',
                 color: viewSide === side ? '#fff' : '#64748b', cursor: 'pointer',
