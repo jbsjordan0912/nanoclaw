@@ -1948,6 +1948,8 @@ function ResearchTab() {
   const [pitcherView, setPitcherView] = useState('mix') // 'mix' or 'stats'
   const [pitcherStats, setPitcherStats] = useState(null)
   const [statsLoading, setStatsLoading] = useState(false)
+  const [statsSeason, setStatsSeason] = useState('2025')
+  const [statsHand, setStatsHand] = useState('')  // '', 'L', 'R'
 
   // Load today's matchups
   useEffect(() => {
@@ -2007,12 +2009,13 @@ function ResearchTab() {
     if (!pitcherId) return
 
     setStatsLoading(true)
-    fetch(`${API}/api/matchups/pitcher-stats/${pitcherId}?season=2025`)
+    const handParam = statsHand ? `&batter_hand=${statsHand}` : ''
+    fetch(`${API}/api/matchups/pitcher-stats/${pitcherId}?season=${statsSeason}${handParam}`)
       .then(r => r.json())
       .then(setPitcherStats)
       .catch(() => setPitcherStats(null))
       .finally(() => setStatsLoading(false))
-  }, [pitcherView, selectedGame, viewSide, selectedPitcher, games])
+  }, [pitcherView, selectedGame, viewSide, selectedPitcher, statsSeason, statsHand, games])
 
   const game = games.find(g => g.game_pk === selectedGame)
   const currentPitcherName = selectedPitcher
@@ -2028,7 +2031,7 @@ function ResearchTab() {
       {/* Game picker */}
       <select
         value={selectedGame || ''}
-        onChange={e => { setSelectedGame(e.target.value ? Number(e.target.value) : null); setSelectedPitcher(null); setRoster(null); setPitchMix(null); setMixPeriod('2026'); setMixHand(''); setPitcherView('mix'); setPitcherStats(null) }}
+        onChange={e => { setSelectedGame(e.target.value ? Number(e.target.value) : null); setSelectedPitcher(null); setRoster(null); setPitchMix(null); setMixPeriod('2026'); setMixHand(''); setPitcherView('mix'); setPitcherStats(null); setStatsSeason('2025'); setStatsHand('') }}
         style={{
           width: '100%', padding: '10px 12px', borderRadius: 8,
           background: '#1e293b', border: '1px solid #334155',
@@ -2110,6 +2113,27 @@ function ResearchTab() {
 
           {pitcherView === 'stats' && (
             <div>
+              {/* Season + hand filters */}
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
+                <div style={{ display: 'flex', gap: 4 }}>
+                  {['2026', '2025', '2024'].map(yr => (
+                    <button key={yr} onClick={() => setStatsSeason(yr)} style={{
+                      padding: '3px 8px', borderRadius: 5, border: 'none', fontSize: 10, fontWeight: 600,
+                      background: statsSeason === yr ? '#2563eb' : '#0f172a',
+                      color: statsSeason === yr ? '#fff' : '#64748b', cursor: 'pointer',
+                    }}>{yr}</button>
+                  ))}
+                </div>
+                <div style={{ display: 'flex', gap: 4 }}>
+                  {[{ v: '', l: 'All' }, { v: 'L', l: 'vs L' }, { v: 'R', l: 'vs R' }].map(opt => (
+                    <button key={opt.v} onClick={() => setStatsHand(opt.v)} style={{
+                      padding: '3px 8px', borderRadius: 5, border: 'none', fontSize: 10, fontWeight: 600,
+                      background: statsHand === opt.v ? '#334155' : '#0f172a',
+                      color: statsHand === opt.v ? '#e2e8f0' : '#475569', cursor: 'pointer',
+                    }}>{opt.l}</button>
+                  ))}
+                </div>
+              </div>
               {statsLoading && <div style={{ fontSize: 11, color: '#475569', textAlign: 'center', padding: 8 }}>Loading...</div>}
               {pitcherStats && !statsLoading && (
                 <div>

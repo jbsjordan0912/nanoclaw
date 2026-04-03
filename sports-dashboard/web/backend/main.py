@@ -451,9 +451,11 @@ async def team_vs_pitcher(team_id: int, pitcher_id: int):
 
 
 @app.get("/api/matchups/pitcher-stats/{pitcher_id}")
-async def pitcher_stats(pitcher_id: int, season: int = 2025):
-    """Get pitcher general stats: FanGraphs + computed from Statcast."""
-    # FanGraphs stats
+async def pitcher_stats(pitcher_id: int, season: int = 2025, batter_hand: str = ""):
+    """Get pitcher general stats: FanGraphs + computed from Statcast.
+    batter_hand: "" (all), "L", or "R"
+    """
+    # FanGraphs stats (not split by hand — season level only)
     fg = {}
     for yr in [season, season - 1, season - 2]:
         result = _supabase.table("mlb_pitcher_season_stats")\
@@ -468,12 +470,14 @@ async def pitcher_stats(pitcher_id: int, season: int = 2025):
             break
 
     # Compute stats from Statcast pitch data
-    pitches = _supabase.table("mlb_pitches")\
-        .select("events,description,outs_when_up,inning")\
+    query = _supabase.table("mlb_pitches")\
+        .select("events,description,outs_when_up,inning,stand")\
         .eq("pitcher", pitcher_id)\
         .eq("game_type", "R")\
-        .eq("game_year", season)\
-        .execute()
+        .eq("game_year", season)
+    if batter_hand:
+        query = query.eq("stand", batter_hand)
+    pitches = query.execute()
 
     pa = 0
     ab = 0
