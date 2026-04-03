@@ -263,7 +263,7 @@ def build_pitcher_pitch_selector(pitches: list[dict]) -> dict:
     return selector
 
 
-def sample_pitch_from_selector(selector: dict, count: tuple) -> dict | None:
+def sample_pitch_from_selector(selector: dict, count: tuple) -> "dict | None":
     """
     Sample a real pitch from the pitcher's history for the given count.
     Falls back to any count if no data for the specific count.
@@ -527,37 +527,201 @@ DEFAULT_PROBS = {
 
 
 # ---------------------------------------------------------------------------
-# Core simulator
+# Physics-based simulator (v2)
 # ---------------------------------------------------------------------------
 
-def simulate_pitch(count: tuple, probs: dict) -> str:
-    """Sample a pitch outcome given the current count."""
+# Strike zone boundaries (feet from center of plate)
+ZONE_X_HALF = 0.83  # half plate width (17 inches / 2 ≈ 0.83 ft)
+ZONE_Z_BOT_DEFAULT = 1.6   # average knee height
+ZONE_Z_TOP_DEFAULT = 3.4   # average chest height
+
+
+def is_in_zone(plate_x, plate_z, sz_top=None, sz_bot=None):
+    """Check if a pitch is in the strike zone."""
+    if plate_x is None or plate_z is None:
+        return False
+    top = sz_top or ZONE_Z_TOP_DEFAULT
+    bot = sz_bot or ZONE_Z_BOT_DEFAULT
+    return abs(plate_x) <= ZONE_X_HALF and bot <= plate_z <= top
+
+
+def build_swing_model(pitches):
+    """
+    Build swing decision model from historical pitch data.
+    Returns per-count: { (b,s): { "in_zone_swing_rate", "chase_rate" } }
+    """
+    counts = {}
+    for p in pitches:
+        b, s = p.get("balls"), p.get("strikes")
+        desc = p.get("description", "")
+        px, pz = p.get("plate_x"), p.get("plate_z")
+        year = p.get("game_year", 2023)
+        if b is None or s is None or px is None or pz is None:
+            continue
+
+        outcome = DESCRIPTION_MAP.get(desc)
+        if outcome is None:
+            continue
+
+        key = (b, s)
+        weight = SEASON_WEIGHTS.get(year, 0.5)
+        in_zone = is_in_zone(px, pz)
+        swung = outcome in ("swinging_strike", "foul", "hit_into_play")
+
+        if key not in counts:
+            counts[key] = {"iz_swings": 0, "iz_total": 0, "oz_swings": 0, "oz_total": 0}
+
+        if in_zone:
+            counts[key]["iz_total"] += weight
+            if swung:
+                counts[key]["iz_swings"] += weight
+        else:
+            counts[key]["oz_total"] += weight
+            if swung:
+                counts[key]["oz_swings"] += weight
+
+    model = {}
+    for key, c in counts.items():
+        iz_rate = c["iz_swings"] / c["iz_total"] if c["iz_total"] > 5 else 0.70  # league avg ~70%
+        oz_rate = c["oz_swings"] / c["oz_total"] if c["oz_total"] > 5 else 0.30  # league avg ~30%
+        model[key] = {"in_zone_swing_rate": iz_rate, "chase_rate": oz_rate}
+
+    return model
+
+
+def build_whiff_model(pitches):
+    """
+    Build whiff/foul/contact rates when the batter swings.
+    Returns per-count: { (b,s): { "whiff_rate", "foul_rate", "contact_rate" } }
+    """
+    counts = {}
+    for p in pitches:
+        b, s = p.get("balls"), p.get("strikes")
+        desc = p.get("description", "")
+        year = p.get("game_year", 2023)
+        if b is None or s is None:
+            continue
+
+        outcome = DESCRIPTION_MAP.get(desc)
+        if outcome not in ("swinging_strike", "foul", "hit_into_play"):
+            continue  # only care about swings
+
+        key = (b, s)
+        weight = SEASON_WEIGHTS.get(year, 0.5)
+        if key not in counts:
+            counts[key] = {"whiff": 0, "foul": 0, "contact": 0}
+
+        if outcome == "swinging_strike":
+            counts[key]["whiff"] += weight
+        elif outcome == "foul":
+            counts[key]["foul"] += weight
+        elif outcome == "hit_into_play":
+            counts[key]["contact"] += weight
+
+    model = {}
+    for key, c in counts.items():
+        total = c["whiff"] + c["foul"] + c["contact"]
+        if total > 0:
+            model[key] = {
+                "whiff_rate": c["whiff"] / total,
+                "foul_rate": c["foul"] / total,
+                "contact_rate": c["contact"] / total,
+            }
+        else:
+            model[key] = {"whiff_rate": 0.25, "foul_rate": 0.35, "contact_rate": 0.40}
+
+    return model
+
+
+def ev_la_to_outcome(ev, la):
+    """
+    Determine batted ball outcome from exit velocity and launch angle.
+    Based on league-wide Statcast data patterns.
+    """
+    if ev is None or la is None:
+        return "field_out"
+
+    # Popup / weak fly
+    if la > 50:
+        return "field_out"
+
+    # Ground ball
+    if la < 10:
+        if ev > 95:
+            return random.choices(["single", "field_out"], weights=[0.55, 0.45])[0]
+        elif ev > 85:
+            return random.choices(["single", "field_out", "grounded_into_double_play"],
+                                  weights=[0.25, 0.65, 0.10])[0]
+        else:
+            return random.choices(["field_out", "single", "grounded_into_double_play"],
+                                  weights=[0.75, 0.15, 0.10])[0]
+
+    # Barrel zone: 26-30° LA + 98+ mph = HR territory
+    if ev >= 98 and 25 <= la <= 35:
+        return random.choices(["home_run", "double", "single", "field_out"],
+                              weights=[0.65, 0.15, 0.10, 0.10])[0]
+
+    # Hard hit fly ball
+    if ev >= 95 and 15 <= la <= 40:
+        if 20 <= la <= 35:
+            return random.choices(["home_run", "double", "triple", "single", "field_out"],
+                                  weights=[0.30, 0.20, 0.05, 0.20, 0.25])[0]
+        elif la > 35:
+            return random.choices(["field_out", "single", "double"],
+                                  weights=[0.65, 0.15, 0.20])[0]
+        else:  # 15-20° line drive
+            return random.choices(["single", "double", "field_out"],
+                                  weights=[0.55, 0.15, 0.30])[0]
+
+    # Medium hit line drive (10-25°)
+    if 10 <= la <= 25:
+        if ev >= 90:
+            return random.choices(["single", "double", "field_out"],
+                                  weights=[0.50, 0.15, 0.35])[0]
+        elif ev >= 80:
+            return random.choices(["single", "field_out", "double"],
+                                  weights=[0.35, 0.55, 0.10])[0]
+        else:
+            return random.choices(["field_out", "single"],
+                                  weights=[0.70, 0.30])[0]
+
+    # Fly ball (25-50°)
+    if 25 <= la <= 50:
+        if ev >= 100:
+            return random.choices(["home_run", "field_out", "double"],
+                                  weights=[0.45, 0.35, 0.20])[0]
+        elif ev >= 90:
+            return random.choices(["field_out", "double", "single", "home_run"],
+                                  weights=[0.50, 0.15, 0.10, 0.25])[0]
+        else:
+            return random.choices(["field_out", "single"],
+                                  weights=[0.85, 0.15])[0]
+
+    return "field_out"
+
+
+# Keep old functions for backward compatibility
+def simulate_pitch(count, probs):
+    """Sample a pitch outcome given the current count (legacy)."""
     count_probs = probs.get(count, DEFAULT_PROBS.get(count, {}))
     if not count_probs:
         return random.choice(PITCH_OUTCOMES)
-
     outcomes = list(count_probs.keys())
     weights = [count_probs[o] for o in outcomes]
     return _weighted_sample(outcomes, weights)
 
 
-def simulate_contact_event(contact_pool: list[dict], event_probs: dict) -> dict:
-    """
-    Sample a contact outcome. Uses real EV/LA/spray data from contact pool.
-    Falls back to event_probs if pool is empty.
-    """
+def simulate_contact_event(contact_pool, event_probs):
+    """Sample a contact outcome (legacy)."""
     if contact_pool:
-        weights = [c["weight"] for c in contact_pool]
+        weights = [c.get("weight", 1) for c in contact_pool]
         return _weighted_sample(contact_pool, weights)
-
-    # Fallback: pick event from probs, no EV/LA data
     if event_probs:
         events = list(event_probs.keys())
         weights = [event_probs[e] for e in events]
         event = _weighted_sample(events, weights)
         return {"events": event, "launch_speed": None, "launch_angle": None,
                 "hc_x": None, "hc_y": None, "hit_distance_sc": None}
-
     return {"events": "field_out", "launch_speed": None, "launch_angle": None,
             "hc_x": None, "hc_y": None, "hit_distance_sc": None}
 
@@ -567,35 +731,38 @@ def simulate_at_bat(
     pitcher_name: str,
     batter_probs: dict,
     pitcher_probs: dict,
-    batter_contact_pool: list[dict],
-    pitcher_contact_pool: list[dict],
+    batter_contact_pool: list,
+    pitcher_contact_pool: list,
     batter_event_probs: dict,
     verbose: bool = True,
     on_1b: bool = False,
     on_2b: bool = False,
     on_3b: bool = False,
     pitcher_pitch_selector: dict = None,
-    batter_pitches_raw: list[dict] = None,
+    batter_pitches_raw: list = None,
     return_data: bool = False,
 ) -> dict:
     """
-    Simulate a single at-bat using Markov chain + pitch-characteristic contact model.
-
-    If pitcher_pitch_selector and batter_pitches_raw are provided, uses the upgraded
-    pitch-characteristic matching model. Otherwise falls back to blended contact pool.
-
-    Returns: {"result": str, "contact": dict or None, "pitches": int}
+    Physics-based at-bat simulator (v2).
+    Pitch location determines ball/strike — no more decoupling.
+    Swing decision is zone-aware. Contact uses EV/LA → outcome physics.
     """
     count = (0, 0)
     pitch_num = 0
-    contact_result = None
-    pitch_log = []  # structured data for API/web
+    pitch_log = []
+
+    # Build physics models from batter's raw data
+    batter_swing = build_swing_model(batter_pitches_raw) if batter_pitches_raw else {}
+    batter_whiff = build_whiff_model(batter_pitches_raw) if batter_pitches_raw else {}
+
+    # Default swing/whiff rates
+    default_swing = {"in_zone_swing_rate": 0.70, "chase_rate": 0.30}
+    default_whiff = {"whiff_rate": 0.25, "foul_rate": 0.35, "contact_rate": 0.40}
 
     if verbose:
         print(f"\n  ⚾ {batter_name} vs. {pitcher_name}")
         print(f"  {'─'*40}")
 
-    # Zone labels for pitch location
     def _loc_label(px, pz):
         if px is None or pz is None:
             return ""
@@ -606,34 +773,50 @@ def simulate_at_bat(
 
     while True:
         pitch_num += 1
+        b, s = count
 
-        # Sample the actual pitch being thrown first (for display + contact matching)
+        # 1. Pitcher throws a pitch (type + location from historical data)
         thrown = None
         if pitcher_pitch_selector:
             thrown = sample_pitch_from_selector(pitcher_pitch_selector, count)
 
-        # Blend batter and pitcher probs 50/50
-        blended = {}
-        for outcome in PITCH_OUTCOMES:
-            b_prob = batter_probs.get(count, DEFAULT_PROBS[count]).get(outcome, 0)
-            p_prob = pitcher_probs.get(count, DEFAULT_PROBS[count]).get(outcome, 0)
-            blended[outcome] = 0.5 * b_prob + 0.5 * p_prob
+        px = thrown.get("plate_x") if thrown else None
+        pz = thrown.get("plate_z") if thrown else None
+        in_zone = is_in_zone(px, pz) if px is not None and pz is not None else random.random() < 0.45
 
-        # Sample outcome
-        outcome = simulate_pitch(count, {count: blended})
+        # 2. Batter decides: swing or take?
+        swing_rates = batter_swing.get(count, default_swing)
+        swing_rate = swing_rates["in_zone_swing_rate"] if in_zone else swing_rates["chase_rate"]
+        swings = random.random() < swing_rate
 
-        b, s = count
-        # Build pitch detail string if we have a real pitch
+        # 3. Determine outcome
+        if not swings:
+            # Took the pitch — location determines ball or strike
+            if in_zone:
+                outcome = "called_strike"
+            else:
+                outcome = "ball"
+        else:
+            # Swung — whiff, foul, or contact?
+            whiff_rates = batter_whiff.get(count, default_whiff)
+            roll = random.random()
+            if roll < whiff_rates["whiff_rate"]:
+                outcome = "swinging_strike"
+            elif roll < whiff_rates["whiff_rate"] + whiff_rates["foul_rate"]:
+                outcome = "foul"
+            else:
+                outcome = "hit_into_play"
+
+        # Build pitch data for logging
         pitch_detail = ""
         pitch_data = {"num": pitch_num, "count": f"{b}-{s}", "outcome": outcome.replace("_", " ").title()}
         if thrown:
             ptype = thrown.get("pitch_type") or "?"
             spd = thrown.get("release_speed")
-            px = thrown.get("plate_x")
-            pz = thrown.get("plate_z")
             spd_str = f"{spd:.0f} mph" if spd else ""
             loc = _loc_label(px, pz)
-            parts = [p for p in [ptype, spd_str, loc] if p]
+            zone_str = "zone" if in_zone else "ball"
+            parts = [p for p in [ptype, spd_str, loc, zone_str] if p]
             pitch_detail = f"  [{', '.join(parts)}]" if parts else ""
             pitch_data.update({
                 "pitch_type": ptype,
@@ -641,59 +824,71 @@ def simulate_at_bat(
                 "location": loc,
                 "plate_x": round(px, 3) if px is not None else None,
                 "plate_z": round(pz, 3) if pz is not None else None,
+                "in_zone": in_zone,
             })
         pitch_log.append(pitch_data)
+
         if verbose:
             print(f"  Pitch {pitch_num} | Count: {b}-{s}{pitch_detail} → {outcome.replace('_', ' ').title()}")
 
-        # Transition count
+        # 4. Transition count
         transition = COUNT_TRANSITIONS[count][outcome]
 
         if transition == "strikeout":
             if verbose:
-                print(f"\n  ❌ STRIKEOUT — swings and misses!" if outcome == "swinging_strike" else f"\n  ❌ STRIKEOUT looking!")
-            return {"result": "strikeout", "contact": None, "pitches": pitch_num, "pitch_log": pitch_log if return_data else []}
+                print(f"\n  ❌ STRIKEOUT{'  — swings and misses!' if outcome == 'swinging_strike' else ' looking!'}")
+            return {"result": "strikeout", "contact": None, "pitches": pitch_num,
+                    "pitch_log": pitch_log if return_data else []}
 
         elif transition == "walk":
             if verbose:
                 print(f"\n  🚶 WALK — ball four!")
-            return {"result": "walk", "contact": None, "pitches": pitch_num, "pitch_log": pitch_log if return_data else []}
+            return {"result": "walk", "contact": None, "pitches": pitch_num,
+                    "pitch_log": pitch_log if return_data else []}
 
         elif transition == "contact":
-            # Upgraded model: use pitch characteristics to find similar pitches in batter history
+            # 5. Contact: find similar pitches, sample EV/LA, determine outcome
             if thrown and batter_pitches_raw:
                 similar = find_similar_pitches(batter_pitches_raw, thrown)
-                contact_pool = [
-                    {
-                        "launch_speed": p["launch_speed"],
-                        "launch_angle": p["launch_angle"],
-                        "hc_x": p.get("hc_x"),
-                        "hc_y": p.get("hc_y"),
-                        "hit_distance_sc": p.get("hit_distance_sc"),
-                        "events": p["events"],
-                        "bb_type": p.get("bb_type"),
-                        "weight": SEASON_WEIGHTS.get(p.get("game_year", 2023), 0.5),
+                if similar:
+                    weights = [SEASON_WEIGHTS.get(p.get("game_year", 2023), 0.5) for p in similar]
+                    sampled = _weighted_sample(similar, weights)
+                    ev = sampled.get("launch_speed")
+                    la = sampled.get("launch_angle")
+
+                    # Add some noise to EV/LA so it's not an exact copy
+                    if ev is not None:
+                        ev = max(50, ev + random.gauss(0, 3))
+                    if la is not None:
+                        la = la + random.gauss(0, 4)
+
+                    # Determine outcome from physics
+                    event = ev_la_to_outcome(ev, la)
+
+                    contact = {
+                        "launch_speed": ev,
+                        "launch_angle": la,
+                        "hc_x": sampled.get("hc_x"),
+                        "hc_y": sampled.get("hc_y"),
+                        "hit_distance_sc": sampled.get("hit_distance_sc"),
+                        "events": event,
+                        "bb_type": sampled.get("bb_type"),
                     }
-                    for p in similar
-                ]
-                contact = simulate_contact_event(contact_pool, batter_event_probs)
+                else:
+                    contact = simulate_contact_event(batter_contact_pool, batter_event_probs)
             else:
-                # Fallback: blend contact pools (original model)
                 combined_pool = batter_contact_pool + pitcher_contact_pool
                 contact = simulate_contact_event(combined_pool, batter_event_probs)
 
             event = contact.get("events", "field_out")
 
-            # Fix impossible outcomes based on game state
-            # GIDP requires a runner on 1st base
+            # Fix impossible outcomes
             if event == "grounded_into_double_play" and not on_1b:
                 event = "field_out"
                 contact = {**contact, "events": "field_out"}
-            # Sac fly requires a runner on base
             if event == "sac_fly" and not (on_1b or on_2b or on_3b):
                 event = "field_out"
                 contact = {**contact, "events": "field_out"}
-            # Force out requires a runner on base
             if event == "force_out" and not (on_1b or on_2b or on_3b):
                 event = "field_out"
                 contact = {**contact, "events": "field_out"}
@@ -701,7 +896,8 @@ def simulate_at_bat(
             if verbose:
                 print(f"\n{get_hit_narrative(contact)}")
 
-            return {"result": event, "contact": contact, "pitches": pitch_num, "pitch_log": pitch_log if return_data else []}
+            return {"result": event, "contact": contact, "pitches": pitch_num,
+                    "pitch_log": pitch_log if return_data else []}
 
         else:
             count = transition
@@ -716,7 +912,7 @@ _BATTER_CACHE_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "fangraphs_batter_cache.json",
 )
-_BATTER_CACHE: dict | None = None   # loaded lazily
+_BATTER_CACHE: object = None   # loaded lazily
 
 # League-average baselines (FanGraphs era-adjusted)
 AVG_WRC_PLUS = 100
@@ -735,7 +931,7 @@ def _load_batter_cache() -> dict:
     return _BATTER_CACHE
 
 
-def get_batter_wrc_plus(batter_id: int, season: int = 2024) -> float | None:
+def get_batter_wrc_plus(batter_id: int, season: int = 2024) -> "float | None":
     """
     Return wRC+ for a batter in a given season.
     Falls back to nearest available season if exact year missing.
@@ -788,7 +984,7 @@ def load_lineup_wrc_plus(lineup_ids: list[int], season: int = 2024) -> tuple[flo
     return avg, details
 
 
-def get_pitcher_fip(pitcher_id: int, season: int = 2024) -> float | None:
+def get_pitcher_fip(pitcher_id: int, season: int = 2024) -> "float | None":
     """
     Look up a pitcher's FIP from the mlb_pitcher_season_stats table in Supabase.
     Falls back to prior seasons if current season missing.
@@ -812,7 +1008,7 @@ def get_pitcher_fip(pitcher_id: int, season: int = 2024) -> float | None:
 def team_strength_wp_adjustment(
     base_wp: float,
     batting_lineup_ids: list[int],
-    fielding_pitcher_id: int | None,
+    fielding_pitcher_id,
     inning: int,
     topbot: str,
     season: int = 2024,
