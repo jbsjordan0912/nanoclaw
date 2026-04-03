@@ -1379,9 +1379,9 @@ function PlakataTab() {
   const wsRef = useRef(null)
   const pollRef = useRef(null)
 
-  // Trading auth
-  const [tradeUnlocked, setTradeUnlocked] = useState(false)
-  const [tradeToken, setTradeToken] = useState('')
+  // Trading auth — persist in localStorage
+  const [tradeUnlocked, setTradeUnlocked] = useState(() => !!localStorage.getItem('plakata_token'))
+  const [tradeToken, setTradeToken] = useState(() => localStorage.getItem('plakata_token') || '')
   const [pinInput, setPinInput] = useState('')
   const [pinError, setPinError] = useState('')
   const [showPinModal, setShowPinModal] = useState(false)
@@ -1480,6 +1480,7 @@ function PlakataTab() {
       if (d.ok) {
         setTradeToken(d.token)
         setTradeUnlocked(true)
+        localStorage.setItem('plakata_token', d.token)
         setShowPinModal(false)
         setPinInput('')
       } else {
@@ -1663,7 +1664,7 @@ function PlakataTab() {
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
           {tradeUnlocked
             ? <span style={{ fontSize: 10, color: '#f59e0b', fontWeight: 700, cursor: 'pointer' }}
-                onClick={() => { setTradeUnlocked(false); setTradeToken('') }}>TRADING ●</span>
+                onClick={() => { setTradeUnlocked(false); setTradeToken(''); localStorage.removeItem('plakata_token') }}>TRADING ●</span>
             : <span style={{ fontSize: 10, color: '#475569', fontWeight: 600, cursor: 'pointer' }}
                 onClick={() => setShowPinModal(true)}>VIEW ONLY</span>
           }
