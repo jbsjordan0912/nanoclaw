@@ -2141,7 +2141,8 @@ function ResearchTab() {
                     <div style={{ fontSize: 9, color: '#475569', marginBottom: 4, textTransform: 'uppercase' }}>
                       {pitcherStats.season}{statsHand ? ` vs ${statsHand}HB` : ''} · {pitcherStats.pa} PA · {pitcherStats.ip} IP · {pitcherStats.total_pitches} pitches
                     </div>
-                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                    {/* Rate stats */}
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 6, marginBottom: 8 }}>
                       {[
                         pitcherStats.era != null && { label: 'ERA', value: pitcherStats.era, color: parseFloat(pitcherStats.era) <= 3.0 ? '#22c55e' : parseFloat(pitcherStats.era) <= 4.0 ? '#f59e0b' : '#ef4444' },
                         { label: 'BAA', value: pitcherStats.baa?.toFixed(3), color: pitcherStats.baa <= .220 ? '#22c55e' : pitcherStats.baa <= .260 ? '#f59e0b' : '#ef4444' },
@@ -2150,15 +2151,26 @@ function ResearchTab() {
                         { label: 'WHIP', value: pitcherStats.whip?.toFixed(2), color: pitcherStats.whip <= 1.10 ? '#22c55e' : pitcherStats.whip <= 1.30 ? '#f59e0b' : '#ef4444' },
                         { label: 'K%', value: pitcherStats.k_pct != null ? `${pitcherStats.k_pct}%` : null },
                         { label: 'BB%', value: pitcherStats.bb_pct != null ? `${pitcherStats.bb_pct}%` : null },
+                        { label: 'IP', value: pitcherStats.ip },
+                      ].filter(s => s && s.value != null).map((s, i) => (
+                        <div key={i} style={{ textAlign: 'center', background: '#0f172a', borderRadius: 6, padding: '6px 4px' }}>
+                          <div style={{ fontSize: 10, color: '#475569', marginBottom: 2 }}>{s.label}</div>
+                          <div style={{ fontSize: 18, fontWeight: 800, color: s.color || '#e2e8f0' }}>{s.value}</div>
+                        </div>
+                      ))}
+                    </div>
+                    {/* Counting stats */}
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 6 }}>
+                      {[
                         { label: 'AB', value: pitcherStats.ab },
                         { label: 'H', value: pitcherStats.hits },
-                        { label: 'HR', value: pitcherStats.hr },
+                        { label: 'HR', value: pitcherStats.hr, color: pitcherStats.hr > 0 ? '#f59e0b' : '#e2e8f0' },
                         { label: 'K', value: pitcherStats.k },
                         { label: 'BB', value: pitcherStats.bb },
                       ].filter(s => s.value != null).map((s, i) => (
-                        <div key={i} style={{ textAlign: 'center', minWidth: 42 }}>
-                          <div style={{ fontSize: 9, color: '#475569' }}>{s.label}</div>
-                          <div style={{ fontSize: 15, fontWeight: 800, color: s.color || '#e2e8f0' }}>{s.value}</div>
+                        <div key={i} style={{ textAlign: 'center', background: '#0f172a', borderRadius: 6, padding: '6px 4px' }}>
+                          <div style={{ fontSize: 10, color: '#475569', marginBottom: 2 }}>{s.label}</div>
+                          <div style={{ fontSize: 16, fontWeight: 700, color: s.color || '#94a3b8' }}>{s.value}</div>
                         </div>
                       ))}
                     </div>
