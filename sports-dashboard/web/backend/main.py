@@ -334,6 +334,7 @@ async def batter_vs_pitcher(batter_id: int, pitcher_id: int):
         .select("events,launch_speed,launch_angle,pitch_type,pitch_name,description,bb_type,hit_distance_sc,stand")\
         .eq("batter", batter_id)\
         .eq("pitcher", pitcher_id)\
+        .eq("game_type", "R")\
         .execute()
 
     pitches = result.data
@@ -463,6 +464,7 @@ async def pitcher_pitch_mix(pitcher_id: int, period: str = "2026", batter_hand: 
         recent = _supabase.table("mlb_pitches")\
             .select("game_pk,game_date")\
             .eq("pitcher", pitcher_id)\
+            .eq("game_type", "R")\
             .order("game_date", desc=True)\
             .limit(5000)\
             .execute()
@@ -481,6 +483,7 @@ async def pitcher_pitch_mix(pitcher_id: int, period: str = "2026", batter_hand: 
         query = _supabase.table("mlb_pitches")\
             .select("pitch_name,pitch_type,description,release_speed,plate_x,plate_z,events,launch_speed,launch_angle,stand,p_throws")\
             .eq("pitcher", pitcher_id)\
+            .eq("game_type", "R")\
             .in_("game_pk", game_pks)
         if batter_hand:
             query = query.eq("stand", batter_hand)
@@ -491,6 +494,7 @@ async def pitcher_pitch_mix(pitcher_id: int, period: str = "2026", batter_hand: 
         query = _supabase.table("mlb_pitches")\
             .select("pitch_name,pitch_type,description,release_speed,plate_x,plate_z,events,launch_speed,launch_angle,stand,p_throws")\
             .eq("pitcher", pitcher_id)\
+            .eq("game_type", "R")\
             .eq("game_year", year)
         if batter_hand:
             query = query.eq("stand", batter_hand)
