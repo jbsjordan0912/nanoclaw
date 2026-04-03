@@ -1392,7 +1392,10 @@ function PlakataTab() {
   const [lockedTarget, setLockedTarget] = useState(null)  // cents — locked target price
   const [tradeLoading, setTradeLoading] = useState(false)
   const [tradeResult, setTradeResult] = useState(null)
-  const swipeRef = useRef(null)  // track swipe gesture
+  const sliderRef = useRef(null)
+  const sliderTrackRef = useRef(null)
+  const [sliderX, setSliderX] = useState(0)
+  const [sliding, setSliding] = useState(false)
 
   // Tap outcome → lock target
   const lockTarget = (outcome) => {
@@ -1409,46 +1412,59 @@ function PlakataTab() {
     setTradeResult(null)
   }
 
-  // Swipe to execute
-  const handleSwipeStart = (e) => {
-    const touch = e.touches?.[0] || e
-    swipeRef.current = { startX: touch.clientX, startY: touch.clientY, swiped: false }
-  }
-  const handleSwipeEnd = async (e) => {
-    if (!swipeRef.current) return
-    const touch = e.changedTouches?.[0] || e
-    const dx = touch.clientX - swipeRef.current.startX
-    const dy = Math.abs(touch.clientY - swipeRef.current.startY)
-    swipeRef.current = null
+  // Slider to execute
+  const handleSliderStart = (e) => {
+    e.preventDefault()
+    setSliding(true)
+    const track = sliderTrackRef.current
+    if (!track) return
+    const trackRect = track.getBoundingClientRect()
+    const startX = (e.touches?.[0] || e).clientX
 
-    // Need 80px+ horizontal swipe, not too vertical
-    if (dx < 80 || dy > 50) return
-    if (!tradeUnlocked || !lockedTarget || !gameData || !gameState) return
+    const onMove = (ev) => {
+      const x = (ev.touches?.[0] || ev).clientX
+      const dx = Math.max(0, Math.min(x - startX, trackRect.width - 48))
+      setSliderX(dx)
+    }
+    const onEnd = async (ev) => {
+      document.removeEventListener('mousemove', onMove)
+      document.removeEventListener('mouseup', onEnd)
+      document.removeEventListener('touchmove', onMove)
+      document.removeEventListener('touchend', onEnd)
 
-    const isTop = gameState.topbot === 'Top'
-    const battingTicker = isTop ? gameData.away?.ticker : gameData.home?.ticker
-    if (!battingTicker) return
-
-    const maxPrice = lockedTarget - buffer
-    if (maxPrice <= 0) return
-
-    setTradeLoading(true)
-    setTradeResult(null)
-    try {
-      const r = await fetch(`${API}/api/trade/execute`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          ticker: battingTicker,
-          max_spend_cents: maxSpend * 100,
-          max_price_cents: maxPrice,
-          side: 'yes',
-          trade_token: tradeToken,
-        }),
-      })
-      setTradeResult(await r.json())
-    } catch (e) { setTradeResult({ error: e.message, ok: false }) }
-    finally { setTradeLoading(false) }
+      const threshold = trackRect.width - 80
+      if (sliderX >= threshold && tradeUnlocked && lockedTarget && gameData && gameState) {
+        // Execute trade
+        const isTop = gameState.topbot === 'Top'
+        const battingTicker = isTop ? gameData.away?.ticker : gameData.home?.ticker
+        const maxPrice = lockedTarget - buffer
+        if (battingTicker && maxPrice > 0) {
+          setTradeLoading(true)
+          setTradeResult(null)
+          try {
+            const r = await fetch(`${API}/api/trade/execute`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                ticker: battingTicker,
+                max_spend_cents: maxSpend * 100,
+                max_price_cents: maxPrice,
+                side: 'yes',
+                trade_token: tradeToken,
+              }),
+            })
+            setTradeResult(await r.json())
+          } catch (e) { setTradeResult({ error: e.message, ok: false }) }
+          finally { setTradeLoading(false) }
+        }
+      }
+      setSliderX(0)
+      setSliding(false)
+    }
+    document.addEventListener('mousemove', onMove)
+    document.addEventListener('mouseup', onEnd)
+    document.addEventListener('touchmove', onMove, { passive: false })
+    document.addEventListener('touchend', onEnd)
   }
 
   const unlockTrading = async () => {
@@ -1550,24 +1566,34 @@ function PlakataTab() {
     setWsPrices({})
     if (!gameData?.game_key) return
 
-    const ws = new WebSocket(getKalshiWsUrl({ gameKey: gameData.game_key }))
-    wsRef.current = ws
+    let reconnectTimer = null
+    const connect = () => {
+      const ws = new WebSocket(getKalshiWsUrl({ gameKey: gameData.game_key }))
+      wsRef.current = ws
 
-    ws.onmessage = (e) => {
-      const data = JSON.parse(e.data)
-      if (data.status === 'connected') {
-        setWsConnected(true)
-      } else if (data.type === 'price') {
-        setWsPrices(prev => ({
-          ...prev,
-          [data.team]: { bid: data.yes_bid, ask: data.yes_ask, last: data.last_price },
-        }))
+      ws.onmessage = (e) => {
+        const data = JSON.parse(e.data)
+        if (data.status === 'connected') {
+          setWsConnected(true)
+        } else if (data.type === 'price') {
+          setWsPrices(prev => ({
+            ...prev,
+            [data.team]: { bid: data.yes_bid, ask: data.yes_ask, last: data.last_price },
+          }))
+        }
       }
+      ws.onclose = () => {
+        setWsConnected(false)
+        reconnectTimer = setTimeout(connect, 2000)
+      }
+      ws.onerror = () => { ws.close() }
     }
-    ws.onclose = () => setWsConnected(false)
-    ws.onerror = () => setWsConnected(false)
+    connect()
 
-    return () => { ws.close() }
+    return () => {
+      if (reconnectTimer) clearTimeout(reconnectTimer)
+      if (wsRef.current) wsRef.current.close()
+    }
   }, [gameData])
 
   // Derive ask prices for scorebug
@@ -1706,57 +1732,88 @@ function PlakataTab() {
             </div>
           </div>
 
-          {/* Swipe bar */}
+          {/* Slide to trade */}
           {lockedTarget && (() => {
             const isTop = gameState?.topbot === 'Top'
-            const battingAbbr = isTop ? gameData?.away?.abbr : gameData?.home?.abbr
-            const liveAsk = wsPrices[battingAbbr]?.ask > 0 ? Math.round(wsPrices[battingAbbr].ask * 100) : null
+            const liveAsk = isTop ? awayAsk : homeAsk
             const maxPrice = lockedTarget - buffer
             const hasEdge = liveAsk != null && maxPrice > liveAsk
 
             return (
-              <div
-                onTouchStart={handleSwipeStart}
-                onTouchEnd={handleSwipeEnd}
-                onMouseDown={handleSwipeStart}
-                onMouseUp={handleSwipeEnd}
-                style={{
-                  background: hasEdge ? '#22c55e15' : '#1e293b',
-                  borderRadius: '0 0 10px 10px', padding: '10px 12px',
-                  border: `1px solid ${hasEdge ? '#22c55e33' : '#33415533'}`,
-                  cursor: hasEdge ? 'grab' : 'default',
-                  userSelect: 'none', WebkitUserSelect: 'none',
-                }}
-              >
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div style={{
+                background: hasEdge ? '#22c55e08' : '#1e293b',
+                borderRadius: '0 0 10px 10px', padding: '10px 12px',
+                border: `1px solid ${hasEdge ? '#22c55e33' : '#33415533'}`,
+              }}>
+                {/* Price info row */}
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
                   <div>
-                    <div style={{ fontSize: 11, color: '#475569' }}>LIVE ASK</div>
+                    <div style={{ fontSize: 9, color: '#475569' }}>LIVE ASK</div>
                     <div style={{ fontSize: 18, fontWeight: 800, color: '#ef4444' }}>
                       {liveAsk != null ? `${liveAsk}¢` : '—'}
                     </div>
                   </div>
-                  <div style={{ fontSize: 20, color: hasEdge ? '#22c55e' : '#334155' }}>→</div>
+                  <div style={{ fontSize: 16, color: '#334155' }}>→</div>
                   <div style={{ textAlign: 'center' }}>
-                    <div style={{ fontSize: 11, color: '#475569' }}>SWEEP TO</div>
-                    <div style={{ fontSize: 18, fontWeight: 800, color: '#f59e0b' }}>
-                      {maxPrice}¢
-                    </div>
+                    <div style={{ fontSize: 9, color: '#475569' }}>SWEEP TO</div>
+                    <div style={{ fontSize: 18, fontWeight: 800, color: '#f59e0b' }}>{maxPrice}¢</div>
                   </div>
-                  <div style={{ fontSize: 20, color: hasEdge ? '#22c55e' : '#334155' }}>→</div>
+                  <div style={{ fontSize: 16, color: '#334155' }}>→</div>
                   <div style={{ textAlign: 'right' }}>
-                    <div style={{ fontSize: 11, color: '#475569' }}>TARGET</div>
-                    <div style={{ fontSize: 18, fontWeight: 800, color: '#22c55e' }}>
-                      {lockedTarget}¢
-                    </div>
+                    <div style={{ fontSize: 9, color: '#475569' }}>TARGET</div>
+                    <div style={{ fontSize: 18, fontWeight: 800, color: '#22c55e' }}>{lockedTarget}¢</div>
                   </div>
                 </div>
+
+                {/* Slider track */}
                 {hasEdge ? (
-                  <div style={{ fontSize: 11, color: '#22c55e', textAlign: 'center', marginTop: 6, fontWeight: 700 }}>
-                    {tradeLoading ? 'EXECUTING...' : '⟩⟩⟩ SWIPE RIGHT TO BUY ⟩⟩⟩'}
+                  <div ref={sliderTrackRef} style={{
+                    position: 'relative', height: 48, borderRadius: 24,
+                    background: '#0f172a', border: '1px solid #22c55e33',
+                    overflow: 'hidden', userSelect: 'none', WebkitUserSelect: 'none',
+                    touchAction: 'none',
+                  }}>
+                    {/* Fill */}
+                    <div style={{
+                      position: 'absolute', left: 0, top: 0, bottom: 0,
+                      width: sliderX + 48, borderRadius: 24,
+                      background: sliding
+                        ? 'linear-gradient(90deg, #22c55e44, #22c55e22)'
+                        : 'transparent',
+                      transition: sliding ? 'none' : 'width 0.3s',
+                    }} />
+                    {/* Label */}
+                    <div style={{
+                      position: 'absolute', inset: 0,
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      fontSize: 12, fontWeight: 700, color: '#22c55e',
+                      letterSpacing: '0.1em', pointerEvents: 'none',
+                    }}>
+                      {tradeLoading ? 'EXECUTING...' : 'SLIDE TO BUY →'}
+                    </div>
+                    {/* Thumb */}
+                    <div
+                      onMouseDown={handleSliderStart}
+                      onTouchStart={handleSliderStart}
+                      style={{
+                        position: 'absolute', top: 2, left: 2 + sliderX,
+                        width: 44, height: 44, borderRadius: 22,
+                        background: '#22c55e', cursor: 'grab',
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        fontSize: 18, color: '#000', fontWeight: 900,
+                        transition: sliding ? 'none' : 'left 0.3s',
+                        boxShadow: '0 2px 8px rgba(34,197,94,0.3)',
+                      }}
+                    >⟩</div>
                   </div>
                 ) : (
-                  <div style={{ fontSize: 11, color: '#475569', textAlign: 'center', marginTop: 6 }}>
-                    {liveAsk != null ? 'No edge — ask already past sweep ceiling' : 'Waiting for live price...'}
+                  <div style={{
+                    height: 48, borderRadius: 24, background: '#0f172a',
+                    border: '1px solid #33415533',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    fontSize: 12, color: '#475569',
+                  }}>
+                    {liveAsk != null ? 'No edge — ask past sweep ceiling' : 'Waiting for live price...'}
                   </div>
                 )}
               </div>
