@@ -1945,6 +1945,9 @@ function ResearchTab() {
   const [mixPeriod, setMixPeriod] = useState('2026')
   const [mixLoading, setMixLoading] = useState(false)
   const [mixHand, setMixHand] = useState('')  // '', 'L', or 'R'
+  const [pitcherView, setPitcherView] = useState('mix') // 'mix' or 'stats'
+  const [pitcherStats, setPitcherStats] = useState(null)
+  const [statsLoading, setStatsLoading] = useState(false)
 
   // Load today's matchups
   useEffect(() => {
@@ -1994,6 +1997,23 @@ function ResearchTab() {
       .finally(() => setMixLoading(false))
   }, [selectedGame, viewSide, selectedPitcher, mixPeriod, mixHand, games])
 
+  // Fetch pitcher stats when switching to stats view
+  useEffect(() => {
+    if (pitcherView !== 'stats') return
+    const g = games.find(gm => gm.game_pk === selectedGame)
+    if (!g) return
+    const pitcherId = selectedPitcher
+      || (viewSide === 'away' ? g.home_starter?.id : g.away_starter?.id)
+    if (!pitcherId) return
+
+    setStatsLoading(true)
+    fetch(`${API}/api/matchups/pitcher-stats/${pitcherId}?season=2025`)
+      .then(r => r.json())
+      .then(setPitcherStats)
+      .catch(() => setPitcherStats(null))
+      .finally(() => setStatsLoading(false))
+  }, [pitcherView, selectedGame, viewSide, selectedPitcher, games])
+
   const game = games.find(g => g.game_pk === selectedGame)
   const currentPitcherName = selectedPitcher
     ? roster?.pitchers?.find(p => p.id === selectedPitcher)?.name || 'Unknown'
@@ -2008,7 +2028,7 @@ function ResearchTab() {
       {/* Game picker */}
       <select
         value={selectedGame || ''}
-        onChange={e => { setSelectedGame(e.target.value ? Number(e.target.value) : null); setSelectedPitcher(null); setRoster(null); setPitchMix(null); setMixPeriod('2026'); setMixHand('') }}
+        onChange={e => { setSelectedGame(e.target.value ? Number(e.target.value) : null); setSelectedPitcher(null); setRoster(null); setPitchMix(null); setMixPeriod('2026'); setMixHand(''); setPitcherView('mix'); setPitcherStats(null) }}
         style={{
           width: '100%', padding: '10px 12px', borderRadius: 8,
           background: '#1e293b', border: '1px solid #334155',
@@ -2074,9 +2094,81 @@ function ResearchTab() {
         </div>
       )}
 
-      {/* Pitch mix */}
+      {/* Pitch mix / stats */}
       {game && (
         <div style={{ background: '#1e293b', borderRadius: 10, padding: 12, marginBottom: 12, border: '1px solid #334155' }}>
+          {/* View toggle */}
+          <div style={{ display: 'flex', gap: 4, marginBottom: 8 }}>
+            {[{ v: 'mix', l: 'Pitch Mix' }, { v: 'stats', l: 'Stats' }].map(t => (
+              <button key={t.v} onClick={() => setPitcherView(t.v)} style={{
+                padding: '4px 12px', borderRadius: 6, border: 'none', fontSize: 11, fontWeight: 700,
+                background: pitcherView === t.v ? '#2563eb' : '#0f172a',
+                color: pitcherView === t.v ? '#fff' : '#64748b', cursor: 'pointer',
+              }}>{t.l}</button>
+            ))}
+          </div>
+
+          {pitcherView === 'stats' && (
+            <div>
+              {statsLoading && <div style={{ fontSize: 11, color: '#475569', textAlign: 'center', padding: 8 }}>Loading...</div>}
+              {pitcherStats && !statsLoading && (
+                <div>
+                  {/* FanGraphs row */}
+                  {pitcherStats.era != null && (
+                    <div style={{ marginBottom: 10 }}>
+                      <div style={{ fontSize: 9, color: '#475569', marginBottom: 4, textTransform: 'uppercase' }}>
+                        FanGraphs {pitcherStats.fg_season} {pitcherStats.fg_team && `· ${pitcherStats.fg_team}`}
+                      </div>
+                      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                        {[
+                          { label: 'ERA', value: pitcherStats.era?.toFixed(2), color: pitcherStats.era <= 3.0 ? '#22c55e' : pitcherStats.era <= 4.0 ? '#f59e0b' : '#ef4444' },
+                          { label: 'FIP', value: pitcherStats.fip?.toFixed(2), color: pitcherStats.fip <= 3.0 ? '#22c55e' : pitcherStats.fip <= 4.0 ? '#f59e0b' : '#ef4444' },
+                          { label: 'WAR', value: pitcherStats.war?.toFixed(1) },
+                          { label: 'K%', value: pitcherStats.fg_k_pct },
+                          { label: 'BB%', value: pitcherStats.fg_bb_pct },
+                          { label: 'Stuff+', value: pitcherStats.stuff_plus, color: pitcherStats.stuff_plus >= 110 ? '#22c55e' : pitcherStats.stuff_plus >= 100 ? '#f59e0b' : '#ef4444' },
+                          { label: 'Loc+', value: pitcherStats.location_plus },
+                          { label: 'Pitch+', value: pitcherStats.pitching_plus },
+                        ].filter(s => s.value != null).map((s, i) => (
+                          <div key={i} style={{ textAlign: 'center', minWidth: 42 }}>
+                            <div style={{ fontSize: 9, color: '#475569' }}>{s.label}</div>
+                            <div style={{ fontSize: 15, fontWeight: 800, color: s.color || '#e2e8f0' }}>{s.value}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {/* Statcast computed */}
+                  <div>
+                    <div style={{ fontSize: 9, color: '#475569', marginBottom: 4, textTransform: 'uppercase' }}>
+                      Statcast {pitcherStats.season} · {pitcherStats.pa} PA · {pitcherStats.ip} IP · {pitcherStats.total_pitches} pitches
+                    </div>
+                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                      {[
+                        { label: 'BAA', value: pitcherStats.baa?.toFixed(3), color: pitcherStats.baa <= .220 ? '#22c55e' : pitcherStats.baa <= .260 ? '#f59e0b' : '#ef4444' },
+                        { label: 'OBPA', value: pitcherStats.obpa?.toFixed(3) },
+                        { label: 'SLGA', value: pitcherStats.slga?.toFixed(3) },
+                        { label: 'WHIP', value: pitcherStats.whip?.toFixed(2), color: pitcherStats.whip <= 1.10 ? '#22c55e' : pitcherStats.whip <= 1.30 ? '#f59e0b' : '#ef4444' },
+                        { label: 'K%', value: pitcherStats.k_pct != null ? `${pitcherStats.k_pct}%` : null },
+                        { label: 'BB%', value: pitcherStats.bb_pct != null ? `${pitcherStats.bb_pct}%` : null },
+                        { label: 'HR', value: pitcherStats.hr },
+                      ].filter(s => s.value != null).map((s, i) => (
+                        <div key={i} style={{ textAlign: 'center', minWidth: 42 }}>
+                          <div style={{ fontSize: 9, color: '#475569' }}>{s.label}</div>
+                          <div style={{ fontSize: 15, fontWeight: 800, color: s.color || '#e2e8f0' }}>{s.value}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
+              {!pitcherStats && !statsLoading && (
+                <div style={{ fontSize: 11, color: '#475569', textAlign: 'center', padding: 8 }}>No stats available</div>
+              )}
+            </div>
+          )}
+
+          {pitcherView === 'mix' && (<div>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
               <span style={{ fontSize: 11, color: '#94a3b8', fontWeight: 700, textTransform: 'uppercase' }}>Pitch Mix</span>
@@ -2155,6 +2247,7 @@ function ResearchTab() {
           {pitchMix && !mixLoading && pitchMix.pitches === 0 && (
             <div style={{ fontSize: 11, color: '#475569', textAlign: 'center', padding: 8 }}>No data for this period</div>
           )}
+        </div>)}
         </div>
       )}
 

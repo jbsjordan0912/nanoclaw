@@ -450,6 +450,113 @@ async def team_vs_pitcher(team_id: int, pitcher_id: int):
     return results
 
 
+@app.get("/api/matchups/pitcher-stats/{pitcher_id}")
+async def pitcher_stats(pitcher_id: int, season: int = 2025):
+    """Get pitcher general stats: FanGraphs + computed from Statcast."""
+    # FanGraphs stats
+    fg = {}
+    for yr in [season, season - 1, season - 2]:
+        result = _supabase.table("mlb_pitcher_season_stats")\
+            .select("*")\
+            .eq("pitcher_id", pitcher_id)\
+            .eq("season", yr)\
+            .limit(1)\
+            .execute()
+        if result.data:
+            fg = result.data[0]
+            fg["_season"] = yr
+            break
+
+    # Compute stats from Statcast pitch data
+    pitches = _supabase.table("mlb_pitches")\
+        .select("events,description,outs_when_up,inning")\
+        .eq("pitcher", pitcher_id)\
+        .eq("game_type", "R")\
+        .eq("game_year", season)\
+        .execute()
+
+    pa = 0
+    ab = 0
+    hits = 0
+    hr = 0
+    bb = 0
+    hbp = 0
+    k = 0
+    singles = 0
+    doubles = 0
+    triples = 0
+    total_pitches = len(pitches.data)
+    outs_recorded = set()  # track unique (game situation) outs
+
+    for p in pitches.data:
+        event = p.get("events")
+        if not event:
+            continue
+        pa += 1
+        if event == "walk":
+            bb += 1
+        elif event == "hit_by_pitch":
+            hbp += 1
+        elif event == "strikeout":
+            k += 1
+            ab += 1
+        elif event in ("sac_fly", "sac_bunt"):
+            pass
+        else:
+            ab += 1
+            if event == "single":
+                hits += 1
+                singles += 1
+            elif event == "double":
+                hits += 1
+                doubles += 1
+            elif event == "triple":
+                hits += 1
+                triples += 1
+            elif event == "home_run":
+                hits += 1
+                hr += 1
+
+    baa = round(hits / ab, 3) if ab > 0 else None
+    obpa = round((hits + bb + hbp) / pa, 3) if pa > 0 else None
+    slga = round((singles + doubles * 2 + triples * 3 + hr * 4) / ab, 3) if ab > 0 else None
+    k_pct = round(k / pa * 100, 1) if pa > 0 else None
+    bb_pct = round(bb / pa * 100, 1) if pa > 0 else None
+
+    # Approximate innings pitched from outs (K + in-play outs)
+    outs = k + (ab - hits - k)  # rough: ABs that aren't hits or Ks = outs in play
+    ip = round(outs / 3, 1) if outs > 0 else 0
+    whip = round((bb + hits) / (outs / 3), 2) if outs > 3 else None
+
+    return {
+        "pitcher_id": pitcher_id,
+        "season": season,
+        # FanGraphs
+        "era": fg.get("era"),
+        "fip": fg.get("fip"),
+        "war": fg.get("war"),
+        "stuff_plus": fg.get("stuff_plus"),
+        "location_plus": fg.get("location_plus"),
+        "pitching_plus": fg.get("pitching_plus"),
+        "fg_k_pct": fg.get("k_pct"),
+        "fg_bb_pct": fg.get("bb_pct"),
+        "fg_season": fg.get("_season"),
+        "fg_name": fg.get("name"),
+        "fg_team": fg.get("team"),
+        # Computed from Statcast
+        "pa": pa,
+        "ip": ip,
+        "baa": baa,
+        "obpa": obpa,
+        "slga": slga,
+        "whip": whip,
+        "k_pct": k_pct,
+        "bb_pct": bb_pct,
+        "hr": hr,
+        "total_pitches": total_pitches,
+    }
+
+
 @app.get("/api/matchups/pitch-mix/{pitcher_id}")
 async def pitcher_pitch_mix(pitcher_id: int, period: str = "2026", batter_hand: str = ""):
     """
