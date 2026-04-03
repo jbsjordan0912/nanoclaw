@@ -518,19 +518,40 @@ async def pitcher_stats(pitcher_id: int, season: int = 2025, batter_hand: str = 
     ip = round(outs / 3, 1) if outs > 0 else 0
     whip = round((bb + hits) / (outs / 3), 2) if outs > 3 else None
 
+    # Pull ERA from MLB Stats API (only for "All" — can't split by hand)
+    era = None
+    if not batter_hand:
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                r = await client.get(f"{MLB_API}/people/{pitcher_id}/stats", params={
+                    "stats": "season", "season": season, "group": "pitching",
+                })
+                for s in r.json().get("stats", []):
+                    for split in s.get("splits", []):
+                        era_val = split.get("stat", {}).get("era")
+                        if era_val is not None:
+                            era = era_val
+        except Exception:
+            pass
+
     return {
         "pitcher_id": pitcher_id,
         "season": season,
-        # Computed from Statcast
         "pa": pa,
+        "ab": ab,
         "ip": ip,
+        "era": era,
         "baa": baa,
         "obpa": obpa,
         "slga": slga,
         "whip": whip,
         "k_pct": k_pct,
         "bb_pct": bb_pct,
+        "hits": hits,
         "hr": hr,
+        "k": k,
+        "bb": bb,
         "total_pitches": total_pitches,
     }
 

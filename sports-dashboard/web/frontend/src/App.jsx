@@ -2143,13 +2143,18 @@ function ResearchTab() {
                     </div>
                     <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                       {[
+                        pitcherStats.era != null && { label: 'ERA', value: pitcherStats.era, color: parseFloat(pitcherStats.era) <= 3.0 ? '#22c55e' : parseFloat(pitcherStats.era) <= 4.0 ? '#f59e0b' : '#ef4444' },
                         { label: 'BAA', value: pitcherStats.baa?.toFixed(3), color: pitcherStats.baa <= .220 ? '#22c55e' : pitcherStats.baa <= .260 ? '#f59e0b' : '#ef4444' },
                         { label: 'OBPA', value: pitcherStats.obpa?.toFixed(3) },
                         { label: 'SLGA', value: pitcherStats.slga?.toFixed(3) },
                         { label: 'WHIP', value: pitcherStats.whip?.toFixed(2), color: pitcherStats.whip <= 1.10 ? '#22c55e' : pitcherStats.whip <= 1.30 ? '#f59e0b' : '#ef4444' },
                         { label: 'K%', value: pitcherStats.k_pct != null ? `${pitcherStats.k_pct}%` : null },
                         { label: 'BB%', value: pitcherStats.bb_pct != null ? `${pitcherStats.bb_pct}%` : null },
+                        { label: 'AB', value: pitcherStats.ab },
+                        { label: 'H', value: pitcherStats.hits },
                         { label: 'HR', value: pitcherStats.hr },
+                        { label: 'K', value: pitcherStats.k },
+                        { label: 'BB', value: pitcherStats.bb },
                       ].filter(s => s.value != null).map((s, i) => (
                         <div key={i} style={{ textAlign: 'center', minWidth: 42 }}>
                           <div style={{ fontSize: 9, color: '#475569' }}>{s.label}</div>
