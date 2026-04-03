@@ -542,6 +542,9 @@ async def pitcher_pitch_mix(pitcher_id: int, period: str = "2026", batter_hand: 
     total = len(pitches)
     mix = []
     for name, t in sorted(types.items(), key=lambda x: -x[1]["count"]):
+        # Filter out noise — misclassified pitches under 2%
+        if t["count"] / total < 0.02:
+            continue
         avg_velo = round(sum(t["speeds"]) / len(t["speeds"]), 1) if t["speeds"] else None
         whiff_rate = round(t["whiffs"] / t["swings"] * 100, 1) if t["swings"] > 0 else None
         avg_ev = round(sum(t["evs"]) / len(t["evs"]), 1) if t["evs"] else None
