@@ -330,14 +330,22 @@ async def matchup_roster(team_id: int):
 @app.get("/api/matchups/bvp")
 async def batter_vs_pitcher(batter_id: int, pitcher_id: int):
     """Get batter vs pitcher historical stats from Statcast data."""
-    result = _supabase.table("mlb_pitches")\
-        .select("events,launch_speed,launch_angle,pitch_type,pitch_name,description,bb_type,hit_distance_sc,stand")\
-        .eq("batter", batter_id)\
-        .eq("pitcher", pitcher_id)\
-        .eq("game_type", "R")\
-        .execute()
+    all_data = []
+    offset = 0
+    while True:
+        batch = _supabase.table("mlb_pitches")\
+            .select("events,launch_speed,launch_angle,pitch_type,pitch_name,description,bb_type,hit_distance_sc,stand")\
+            .eq("batter", batter_id)\
+            .eq("pitcher", pitcher_id)\
+            .eq("game_type", "R")\
+            .range(offset, offset + 999)\
+            .execute()
+        all_data.extend(batch.data or [])
+        if len(batch.data or []) < 1000:
+            break
+        offset += 1000
 
-    pitches = result.data
+    pitches = all_data
     if not pitches:
         return {"pa": 0, "ab": 0, "hits": 0, "hr": 0, "k": 0, "bb": 0,
                 "avg": None, "slg": None, "pitches_seen": 0, "pitch_types": {}, "stand": None}
@@ -455,15 +463,28 @@ async def pitcher_stats(pitcher_id: int, season: int = 2025, batter_hand: str = 
     """Get pitcher stats computed from Statcast data.
     batter_hand: "" (all), "L", or "R"
     """
-    # Compute stats from Statcast pitch data
-    query = _supabase.table("mlb_pitches")\
-        .select("events,description,outs_when_up,inning,stand")\
-        .eq("pitcher", pitcher_id)\
-        .eq("game_type", "R")\
-        .eq("game_year", season)
-    if batter_hand:
-        query = query.eq("stand", batter_hand)
-    pitches = query.execute()
+    # Compute stats from Statcast pitch data (paginate to get all rows)
+    all_pitches = []
+    offset = 0
+    page_size = 1000
+    while True:
+        query = _supabase.table("mlb_pitches")\
+            .select("events,description,outs_when_up,inning,stand")\
+            .eq("pitcher", pitcher_id)\
+            .eq("game_type", "R")\
+            .eq("game_year", season)
+        if batter_hand:
+            query = query.eq("stand", batter_hand)
+        result = query.range(offset, offset + page_size - 1).execute()
+        batch = result.data or []
+        all_pitches.extend(batch)
+        if len(batch) < page_size:
+            break
+        offset += page_size
+
+    class _Pitches:
+        data = all_pitches
+    pitches = _Pitches()
 
     pa = 0
     ab = 0
@@ -608,28 +629,42 @@ async def pitcher_pitch_mix(pitcher_id: int, period: str = "2026", batter_hand: 
                 break
         if not game_pks:
             return {"pitches": 0, "mix": [], "period": period}
-        # Fetch all pitches from those games
-        query = _supabase.table("mlb_pitches")\
-            .select("pitch_name,pitch_type,description,release_speed,plate_x,plate_z,events,launch_speed,launch_angle,stand,p_throws")\
-            .eq("pitcher", pitcher_id)\
-            .eq("game_type", "R")\
-            .in_("game_pk", game_pks)
-        if batter_hand:
-            query = query.eq("stand", batter_hand)
-        result = query.execute()
+        # Fetch all pitches from those games (paginated)
+        all_pitches = []
+        offset = 0
+        while True:
+            query = _supabase.table("mlb_pitches")\
+                .select("pitch_name,pitch_type,description,release_speed,plate_x,plate_z,events,launch_speed,launch_angle,stand,p_throws")\
+                .eq("pitcher", pitcher_id)\
+                .eq("game_type", "R")\
+                .in_("game_pk", game_pks)
+            if batter_hand:
+                query = query.eq("stand", batter_hand)
+            batch = query.range(offset, offset + 999).execute()
+            all_pitches.extend(batch.data or [])
+            if len(batch.data or []) < 1000:
+                break
+            offset += 1000
     else:
-        # Season filter
+        # Season filter (paginated)
         year = int(period)
-        query = _supabase.table("mlb_pitches")\
-            .select("pitch_name,pitch_type,description,release_speed,plate_x,plate_z,events,launch_speed,launch_angle,stand,p_throws")\
-            .eq("pitcher", pitcher_id)\
-            .eq("game_type", "R")\
-            .eq("game_year", year)
-        if batter_hand:
-            query = query.eq("stand", batter_hand)
-        result = query.execute()
+        all_pitches = []
+        offset = 0
+        while True:
+            query = _supabase.table("mlb_pitches")\
+                .select("pitch_name,pitch_type,description,release_speed,plate_x,plate_z,events,launch_speed,launch_angle,stand,p_throws")\
+                .eq("pitcher", pitcher_id)\
+                .eq("game_type", "R")\
+                .eq("game_year", year)
+            if batter_hand:
+                query = query.eq("stand", batter_hand)
+            batch = query.range(offset, offset + 999).execute()
+            all_pitches.extend(batch.data or [])
+            if len(batch.data or []) < 1000:
+                break
+            offset += 1000
 
-    pitches = result.data
+    pitches = all_pitches
     if not pitches:
         return {"pitches": 0, "mix": [], "period": period, "throws": None}
 
