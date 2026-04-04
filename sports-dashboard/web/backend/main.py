@@ -475,15 +475,29 @@ async def pitcher_stats(pitcher_id: int, season: int = 2025, batter_hand: str = 
     singles = 0
     doubles = 0
     triples = 0
+    outs = 0  # count outs explicitly
     total_pitches = len(pitches.data)
-    outs_recorded = set()  # track unique (game situation) outs
+
+    # Events that record outs and how many
+    OUT_EVENTS = {
+        "strikeout": 1, "field_out": 1, "force_out": 1,
+        "fielders_choice": 1, "fielders_choice_out": 1,
+        "sac_fly": 1, "sac_bunt": 1, "sac_fly_double_play": 2,
+        "grounded_into_double_play": 2, "double_play": 2,
+        "triple_play": 3, "strikeout_double_play": 2,
+    }
 
     for p in pitches.data:
         event = p.get("events")
-        if not event:
+        if not event or event == "truncated_pa":
             continue
         pa += 1
-        if event == "walk":
+
+        # Count outs
+        if event in OUT_EVENTS:
+            outs += OUT_EVENTS[event]
+
+        if event in ("walk", "intent_walk"):
             bb += 1
         elif event == "hit_by_pitch":
             hbp += 1
@@ -491,7 +505,7 @@ async def pitcher_stats(pitcher_id: int, season: int = 2025, batter_hand: str = 
             k += 1
             ab += 1
         elif event in ("sac_fly", "sac_bunt"):
-            pass
+            pass  # not an AB
         else:
             ab += 1
             if event == "single":
@@ -512,19 +526,14 @@ async def pitcher_stats(pitcher_id: int, season: int = 2025, batter_hand: str = 
     slga = round((singles + doubles * 2 + triples * 3 + hr * 4) / ab, 3) if ab > 0 else None
     k_pct = round(k / pa * 100, 1) if pa > 0 else None
     bb_pct = round(bb / pa * 100, 1) if pa > 0 else None
-
-    # Count outs properly: PA that aren't hits, walks, HBP = outs recorded
-    # This includes strikeouts, field outs, sac flies, DPs, FCs, etc.
-    outs = pa - hits - bb - hbp
-    # Format innings in baseball notation: 63.2 = 63 innings + 2 outs
-    full_innings = outs // 3
-    partial = outs % 3
-    ip = f"{full_innings}.{partial}" if partial > 0 else str(full_innings)
-    ip_decimal = outs / 3  # for WHIP calculation
+    # Compute WHIP from our data (outs we counted)
+    ip_decimal = outs / 3
     whip = round((bb + hits) / ip_decimal, 2) if ip_decimal > 1 else None
 
-    # Pull ERA from MLB Stats API (only for "All" — can't split by hand)
+    # Pull ERA, IP, WHIP from MLB Stats API (accurate, not split by hand)
     era = None
+    ip = None
+    mlb_whip = None
     if not batter_hand:
         try:
             import httpx
@@ -534,11 +543,20 @@ async def pitcher_stats(pitcher_id: int, season: int = 2025, batter_hand: str = 
                 })
                 for s in r.json().get("stats", []):
                     for split in s.get("splits", []):
-                        era_val = split.get("stat", {}).get("era")
-                        if era_val is not None:
-                            era = era_val
+                        stat = split.get("stat", {})
+                        era = stat.get("era")
+                        ip = stat.get("inningsPitched")
+                        mlb_whip = stat.get("whip")
+                        if mlb_whip:
+                            whip = float(mlb_whip)
         except Exception:
             pass
+
+    # If no MLB API IP (hand splits), compute from our outs in baseball notation
+    if ip is None:
+        full_innings = outs // 3
+        partial = outs % 3
+        ip = f"{full_innings}.{partial}" if partial > 0 else str(full_innings)
 
     return {
         "pitcher_id": pitcher_id,
