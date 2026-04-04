@@ -513,10 +513,15 @@ async def pitcher_stats(pitcher_id: int, season: int = 2025, batter_hand: str = 
     k_pct = round(k / pa * 100, 1) if pa > 0 else None
     bb_pct = round(bb / pa * 100, 1) if pa > 0 else None
 
-    # Approximate innings pitched from outs (K + in-play outs)
-    outs = k + (ab - hits - k)  # rough: ABs that aren't hits or Ks = outs in play
-    ip = round(outs / 3, 1) if outs > 0 else 0
-    whip = round((bb + hits) / (outs / 3), 2) if outs > 3 else None
+    # Count outs properly: PA that aren't hits, walks, HBP = outs recorded
+    # This includes strikeouts, field outs, sac flies, DPs, FCs, etc.
+    outs = pa - hits - bb - hbp
+    # Format innings in baseball notation: 63.2 = 63 innings + 2 outs
+    full_innings = outs // 3
+    partial = outs % 3
+    ip = f"{full_innings}.{partial}" if partial > 0 else str(full_innings)
+    ip_decimal = outs / 3  # for WHIP calculation
+    whip = round((bb + hits) / ip_decimal, 2) if ip_decimal > 1 else None
 
     # Pull ERA from MLB Stats API (only for "All" — can't split by hand)
     era = None
