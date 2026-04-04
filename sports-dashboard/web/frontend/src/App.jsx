@@ -1898,36 +1898,54 @@ function BvPCard({ batter, compact }) {
 
   return (
     <div style={{
-      background: '#0f172a', borderRadius: 8, padding: '8px 10px', marginBottom: 4,
-      border: `1px solid ${batter.avg >= 0.300 ? '#22c55e22' : '#1e293b'}`,
+      background: '#0f172a', borderRadius: 10, padding: '10px 12px', marginBottom: 6,
+      border: `1px solid ${batter.avg >= 0.300 ? '#22c55e33' : '#1e293b'}`,
     }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+      {/* Name + AVG */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
         <div>
-          <span style={{ fontSize: 13, fontWeight: 700, color: '#e2e8f0' }}>{batter.batter_name}</span>
-          <span style={{ fontSize: 10, color: '#475569', marginLeft: 6 }}>{batter.position}</span>
-          {batter.stand && (
-            <span style={{ fontSize: 9, color: '#64748b', marginLeft: 4, padding: '0 4px', borderRadius: 3, background: '#0f172a' }}>
-              {batter.stand}HB
-            </span>
-          )}
+          <div style={{ fontSize: 15, fontWeight: 800, color: '#e2e8f0' }}>{batter.batter_name}</div>
+          <div style={{ display: 'flex', gap: 4, alignItems: 'center', marginTop: 2 }}>
+            <span style={{ fontSize: 11, color: '#475569' }}>{batter.position}</span>
+            {batter.stand && (
+              <span style={{ fontSize: 10, color: '#64748b', padding: '1px 5px', borderRadius: 4, background: '#1e293b' }}>
+                {batter.stand}HB
+              </span>
+            )}
+          </div>
         </div>
-        <div style={{ fontSize: 18, fontWeight: 900, color: avgColor }}>
-          {batter.avg != null ? batter.avg.toFixed(3) : '—'}
+        <div style={{ textAlign: 'right' }}>
+          <div style={{ fontSize: 24, fontWeight: 900, color: avgColor, lineHeight: 1 }}>
+            {batter.avg != null ? batter.avg.toFixed(3) : '—'}
+          </div>
+          <div style={{ fontSize: 10, color: '#475569', marginTop: 2 }}>AVG</div>
         </div>
       </div>
-      <div style={{ display: 'flex', gap: 12, fontSize: 11, color: '#94a3b8' }}>
-        <span>{batter.pa} PA</span>
-        <span>{batter.ab} AB</span>
-        <span>{batter.hits} H</span>
-        <span style={{ color: batter.hr > 0 ? '#f59e0b' : '#475569' }}>{batter.hr} HR</span>
-        <span>{batter.k} K</span>
-        <span>{batter.bb} BB</span>
-        <span>SLG {batter.slg != null ? batter.slg.toFixed(3) : '—'}</span>
+      {/* Counting stats grid */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 4, marginBottom: 6 }}>
+        {[
+          { label: 'PA', value: batter.pa },
+          { label: 'AB', value: batter.ab },
+          { label: 'H', value: batter.hits },
+          { label: 'HR', value: batter.hr, color: batter.hr > 0 ? '#f59e0b' : '#94a3b8' },
+          { label: 'K', value: batter.k },
+          { label: 'BB', value: batter.bb },
+        ].map((s, i) => (
+          <div key={i} style={{ textAlign: 'center', background: '#1e293b', borderRadius: 5, padding: '4px 2px' }}>
+            <div style={{ fontSize: 9, color: '#475569' }}>{s.label}</div>
+            <div style={{ fontSize: 15, fontWeight: 700, color: s.color || '#e2e8f0' }}>{s.value}</div>
+          </div>
+        ))}
       </div>
-      <div style={{ display: 'flex', gap: 12, fontSize: 10, color: '#475569', marginTop: 2 }}>
+      {/* Rate stats + EV */}
+      <div style={{ display: 'flex', gap: 10, fontSize: 12, color: '#94a3b8' }}>
+        <span>SLG <span style={{ fontWeight: 700, color: '#e2e8f0' }}>{batter.slg != null ? batter.slg.toFixed(3) : '—'}</span></span>
+        {batter.obp != null && <span>OBP <span style={{ fontWeight: 700, color: '#e2e8f0' }}>{batter.obp.toFixed(3)}</span></span>}
         {batter.avg_ev != null && <span style={{ color: evColor }}>EV {batter.avg_ev}</span>}
         {batter.avg_la != null && <span>LA {batter.avg_la}°</span>}
-        <span>{batter.pitches_seen} pitches seen</span>
+      </div>
+      <div style={{ fontSize: 10, color: '#334155', marginTop: 3 }}>
+        {batter.pitches_seen} pitches seen
       </div>
     </div>
   )
