@@ -1526,36 +1526,8 @@ async def kalshi_ws_proxy(websocket: WebSocket, ticker: str = "", game_key: str 
 # ---------------------------------------------------------------------------
 
 def _kalshi_auth(method: str, path: str) -> dict:
-    """Build Kalshi auth headers."""
-    from cryptography.hazmat.primitives import hashes, serialization
-    from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
-    from pathlib import Path
-
-    key_id = os.environ.get("KALSHI_API_KEY_ID", "")
-    if not key_id:
-        return {}
-    key_content = os.environ.get("KALSHI_PRIVATE_KEY", "")
-    if key_content:
-        key_bytes = key_content.replace("\\n", "\n").encode()
-    else:
-        key_path = os.environ.get("KALSHI_PRIVATE_KEY_PATH", "")
-        if not key_path or not os.path.exists(key_path):
-            key_path = os.path.join(os.path.dirname(__file__), "kalshi.key")
-        with open(key_path, "rb") as f:
-            key_bytes = f.read()
-    private_key = serialization.load_pem_private_key(key_bytes, password=None)
-    ts = str(int(time.time() * 1000))
-    msg = (ts + method.upper() + path).encode()
-    sig = private_key.sign(
-        msg,
-        asym_padding.PSS(mgf=asym_padding.MGF1(hashes.SHA256()), salt_length=asym_padding.PSS.MAX_LENGTH),
-        hashes.SHA256(),
-    )
-    return {
-        "KALSHI-ACCESS-KEY": key_id,
-        "KALSHI-ACCESS-TIMESTAMP": ts,
-        "KALSHI-ACCESS-SIGNATURE": base64.b64encode(sig).decode(),
-    }
+    """Alias for the existing Kalshi auth helper."""
+    return _kalshi_auth_headers(method, path)
 
 
 async def _fetch_kalshi_series(series_ticker: str) -> list:
