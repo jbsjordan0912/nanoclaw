@@ -1613,6 +1613,7 @@ async def nfl_draft(category: str = "top"):
         return {}  # handled by /api/nfl/draft/positional endpoint below
 
     elif category == "team_pos":
+        markets = await _fetch_kalshi_series("KXNFLTEAM1POS")
         teams = {}
         for m in markets:
             ticker = m.get("ticker", "")
@@ -1632,6 +1633,7 @@ async def nfl_draft(category: str = "top"):
         return dict(sorted(teams.items()))
 
     elif category == "drafted_by":
+        markets = await _fetch_kalshi_series("KXNFLDRAFTTEAM")
         players = {}
         for m in markets:
             ticker = m.get("ticker", "")
@@ -1641,7 +1643,12 @@ async def nfl_draft(category: str = "top"):
             player_code = parts[1].replace("26", "")
             team = parts[2]
             bid = _parse_price(m, "yes_bid")
-            name = m.get("yes_sub_title") or ""
+            # Player name is in title: "Will Omar Cooper Jr. be drafted by Washington?"
+            title = m.get("title", "")
+            if "be drafted by" in title:
+                name = title.split("Will ", 1)[-1].split(" be drafted by")[0]
+            else:
+                name = title
             if player_code not in players:
                 players[player_code] = {"name": name, "teams": []}
             elif name and not players[player_code]["name"]:
