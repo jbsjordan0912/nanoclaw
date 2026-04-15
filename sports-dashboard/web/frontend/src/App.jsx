@@ -2315,20 +2315,134 @@ const nudgeBtn = {
   display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0,
 }
 
+// ── NFL Draft Market Row ──────────────────────────────────────────────────────
+function DraftRow({ name, subtitle, bid, ask, last, volume, i }) {
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+      padding: '10px 12px', background: i % 2 === 0 ? '#1e293b' : '#0f172a',
+      borderRadius: 6, marginBottom: 2,
+    }}>
+      <div style={{ flex: 1 }}>
+        <div style={{ fontSize: 14, fontWeight: 600, color: '#e2e8f0' }}>{name}</div>
+        {subtitle && <div style={{ fontSize: 11, color: '#64748b' }}>{subtitle}</div>}
+      </div>
+      <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+        {ask != null && (
+          <div style={{ textAlign: 'right' }}>
+            <div style={{ fontSize: 11, color: '#64748b' }}>Bid/Ask</div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: '#22c55e', fontVariantNumeric: 'tabular-nums' }}>
+              {bid}¢ / {ask}¢
+            </div>
+          </div>
+        )}
+        {ask == null && (
+          <div style={{ textAlign: 'right' }}>
+            <div style={{ fontSize: 11, color: '#64748b' }}>Bid</div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: '#22c55e', fontVariantNumeric: 'tabular-nums' }}>{bid}¢</div>
+          </div>
+        )}
+        {last != null && (
+          <div style={{ textAlign: 'right', minWidth: 40 }}>
+            <div style={{ fontSize: 11, color: '#64748b' }}>Last</div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: '#f1f5f9', fontVariantNumeric: 'tabular-nums' }}>{last}¢</div>
+          </div>
+        )}
+        {volume != null && (
+          <div style={{ textAlign: 'right', minWidth: 45 }}>
+            <div style={{ fontSize: 11, color: '#64748b' }}>Vol</div>
+            <div style={{ fontSize: 12, color: '#94a3b8', fontVariantNumeric: 'tabular-nums' }}>{volume?.toLocaleString()}</div>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ── Dropdown select ──────────────────────────────────────────────────────────
+function DraftSelect({ label, value, options, onChange }) {
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <label style={{ display: 'block', fontSize: 11, color: '#94a3b8', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+        {label}
+      </label>
+      <select value={value} onChange={e => onChange(e.target.value)} style={{
+        width: '100%', padding: '10px 12px', borderRadius: 8,
+        background: '#1e293b', border: '1px solid #334155',
+        color: '#f1f5f9', fontSize: 14, outline: 'none',
+      }}>
+        <option value="">Select...</option>
+        {options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+      </select>
+    </div>
+  )
+}
+
 // ── NFL Draft Tab ─────────────────────────────────────────────────────────────
 function NFLDraftTab() {
-  const [draftData, setDraftData] = useState(null)
-  const [loading, setLoading] = useState(true)
   const [category, setCategory] = useState('top')
+
+  // Round 1 state
+  const [r1Data, setR1Data] = useState(null)
+  const [r1Loading, setR1Loading] = useState(false)
+
+  // Top N state
+  const [topNData, setTopNData] = useState(null)
+  const [topNLoading, setTopNLoading] = useState(false)
+  const [topNPick, setTopNPick] = useState('')
+
+  // Team Pos state
+  const [teamPosData, setTeamPosData] = useState(null)
+  const [teamPosLoading, setTeamPosLoading] = useState(false)
+  const [teamPosTeam, setTeamPosTeam] = useState('')
+
+  // Drafted By state
+  const [draftedByData, setDraftedByData] = useState(null)
+  const [draftedByLoading, setDraftedByLoading] = useState(false)
+  const [draftedBySearch, setDraftedBySearch] = useState('')
+
   const [error, setError] = useState(null)
 
+  // Load Round 1 on mount (small dataset)
   useEffect(() => {
-    setLoading(true)
-    setError(null)
-    fetch(`${API}/api/nfl/draft?category=${category}`)
+    setR1Loading(true)
+    fetch(`${API}/api/nfl/draft?category=top`)
       .then(r => r.json())
-      .then(data => { setDraftData(data); setLoading(false) })
-      .catch(e => { setError(e.message); setLoading(false) })
+      .then(data => { setR1Data(data); setR1Loading(false) })
+      .catch(e => { setError(e.message); setR1Loading(false) })
+  }, [])
+
+  // Load Top N when category selected (cached after first load)
+  useEffect(() => {
+    if (category === 'pick' && !topNData && !topNLoading) {
+      setTopNLoading(true)
+      fetch(`${API}/api/nfl/draft?category=pick`)
+        .then(r => r.json())
+        .then(data => { setTopNData(data); setTopNLoading(false) })
+        .catch(e => { setError(e.message); setTopNLoading(false) })
+    }
+  }, [category])
+
+  // Load Team Pos when category selected
+  useEffect(() => {
+    if (category === 'team_pos' && !teamPosData && !teamPosLoading) {
+      setTeamPosLoading(true)
+      fetch(`${API}/api/nfl/draft?category=team_pos`)
+        .then(r => r.json())
+        .then(data => { setTeamPosData(data); setTeamPosLoading(false) })
+        .catch(e => { setError(e.message); setTeamPosLoading(false) })
+    }
+  }, [category])
+
+  // Load Drafted By when category selected
+  useEffect(() => {
+    if (category === 'drafted_by' && !draftedByData && !draftedByLoading) {
+      setDraftedByLoading(true)
+      fetch(`${API}/api/nfl/draft?category=drafted_by`)
+        .then(r => r.json())
+        .then(data => { setDraftedByData(data); setDraftedByLoading(false) })
+        .catch(e => { setError(e.message); setDraftedByLoading(false) })
+    }
   }, [category])
 
   const categories = [
@@ -2337,6 +2451,19 @@ function NFLDraftTab() {
     { id: 'team_pos', label: 'Team Pos' },
     { id: 'drafted_by', label: 'Drafted By' },
   ]
+
+  const NFL_TEAMS = [
+    'ARI','ATL','BAL','BUF','CAR','CHI','CIN','CLE','DAL','DEN','DET','GB',
+    'HOU','IND','JAC','KC','LAC','LAR','LV','MIA','MIN','NE','NO','NYG',
+    'NYJ','PHI','PIT','SEA','SF','TB','TEN','WAS'
+  ]
+
+  // Filter drafted by search
+  const filteredDraftedBy = draftedByData
+    ? Object.entries(draftedByData).filter(([name]) =>
+        !draftedBySearch || name.toLowerCase().includes(draftedBySearch.toLowerCase())
+      )
+    : []
 
   return (
     <div>
@@ -2352,117 +2479,93 @@ function NFLDraftTab() {
         ))}
       </div>
 
-      {loading && <div style={{ textAlign: 'center', color: '#475569', padding: 40 }}>Loading draft markets...</div>}
       {error && <div style={{ textAlign: 'center', color: '#ef4444', padding: 20 }}>Error: {error}</div>}
 
-      {draftData && !loading && category === 'top' && (
-        <div>
-          {draftData.map((m, i) => (
-            <div key={m.ticker} style={{
-              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-              padding: '10px 12px', background: i % 2 === 0 ? '#1e293b' : '#0f172a',
-              borderRadius: 6, marginBottom: 2,
-            }}>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 14, fontWeight: 600, color: '#e2e8f0' }}>{m.name}</div>
-                <div style={{ fontSize: 11, color: '#64748b' }}>{m.subtitle || m.ticker}</div>
-              </div>
-              <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
-                <div style={{ textAlign: 'right' }}>
-                  <div style={{ fontSize: 11, color: '#64748b' }}>Bid/Ask</div>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: '#22c55e', fontVariantNumeric: 'tabular-nums' }}>
-                    {m.yes_bid}¢ / {m.yes_ask}¢
-                  </div>
-                </div>
-                <div style={{ textAlign: 'right', minWidth: 50 }}>
-                  <div style={{ fontSize: 11, color: '#64748b' }}>Last</div>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: '#f1f5f9', fontVariantNumeric: 'tabular-nums' }}>
-                    {m.last_price}¢
-                  </div>
-                </div>
-                <div style={{ textAlign: 'right', minWidth: 50 }}>
-                  <div style={{ fontSize: 11, color: '#64748b' }}>Vol</div>
-                  <div style={{ fontSize: 12, color: '#94a3b8', fontVariantNumeric: 'tabular-nums' }}>
-                    {m.volume?.toLocaleString()}
-                  </div>
-                </div>
-              </div>
-            </div>
-          ))}
-        </div>
+      {/* ── Round 1 ── */}
+      {category === 'top' && (
+        r1Loading
+          ? <div style={{ textAlign: 'center', color: '#475569', padding: 40 }}>Loading...</div>
+          : r1Data && r1Data.map((m, i) => (
+              <DraftRow key={m.ticker} i={i} name={m.name} subtitle={m.subtitle} bid={m.yes_bid} ask={m.yes_ask} last={m.last_price} volume={m.volume} />
+            ))
       )}
 
-      {draftData && !loading && category === 'pick' && (
-        <div>
-          {Object.entries(draftData).map(([pick, players]) => (
-            <div key={pick} style={{ marginBottom: 16 }}>
-              <div style={{ fontSize: 14, fontWeight: 800, color: '#7c3aed', marginBottom: 6, padding: '4px 0', borderBottom: '1px solid #1e293b' }}>
-                Pick #{pick}
+      {/* ── Top N ── */}
+      {category === 'pick' && (
+        topNLoading
+          ? <div style={{ textAlign: 'center', color: '#475569', padding: 40 }}>Loading...</div>
+          : topNData && (
+            <div>
+              <DraftSelect label="Draft Position" value={topNPick}
+                options={Object.keys(topNData).map(k => ({ value: k, label: k }))}
+                onChange={setTopNPick} />
+              {topNPick && topNData[topNPick] && topNData[topNPick]
+                .filter(m => m.yes_bid > 0)
+                .map((m, i) => (
+                  <DraftRow key={m.ticker} i={i} name={m.name} bid={m.yes_bid} volume={m.volume} />
+                ))
+              }
+              {!topNPick && <div style={{ textAlign: 'center', color: '#475569', padding: 30, fontSize: 13 }}>Select a draft position above</div>}
+            </div>
+          )
+      )}
+
+      {/* ── Team Position ── */}
+      {category === 'team_pos' && (
+        teamPosLoading
+          ? <div style={{ textAlign: 'center', color: '#475569', padding: 40 }}>Loading...</div>
+          : teamPosData && (
+            <div>
+              <DraftSelect label="Team" value={teamPosTeam}
+                options={NFL_TEAMS.filter(t => teamPosData[t]).map(t => ({ value: t, label: t }))}
+                onChange={setTeamPosTeam} />
+              {teamPosTeam && teamPosData[teamPosTeam] && teamPosData[teamPosTeam].map((p, i) => (
+                <DraftRow key={p.pos} i={i} name={p.pos} bid={p.bid} ask={p.ask} last={p.last} />
+              ))}
+              {!teamPosTeam && <div style={{ textAlign: 'center', color: '#475569', padding: 30, fontSize: 13 }}>Select a team above</div>}
+            </div>
+          )
+      )}
+
+      {/* ── Drafted By ── */}
+      {category === 'drafted_by' && (
+        draftedByLoading
+          ? <div style={{ textAlign: 'center', color: '#475569', padding: 40 }}>Loading...</div>
+          : draftedByData && (
+            <div>
+              <div style={{ marginBottom: 12 }}>
+                <label style={{ display: 'block', fontSize: 11, color: '#94a3b8', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                  Search Player
+                </label>
+                <input value={draftedBySearch} onChange={e => setDraftedBySearch(e.target.value)}
+                  placeholder="Type player name..."
+                  style={{
+                    width: '100%', padding: '10px 12px', borderRadius: 8,
+                    background: '#1e293b', border: '1px solid #334155',
+                    color: '#f1f5f9', fontSize: 14, outline: 'none', boxSizing: 'border-box',
+                  }} />
               </div>
-              {players.map((m, i) => (
-                <div key={m.ticker} style={{
-                  display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                  padding: '8px 12px', background: i % 2 === 0 ? '#1e293b' : 'transparent',
-                  borderRadius: 4,
-                }}>
-                  <div style={{ fontSize: 13, fontWeight: 600, color: '#e2e8f0', flex: 1 }}>{m.name}</div>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: '#22c55e', fontVariantNumeric: 'tabular-nums', minWidth: 60, textAlign: 'right' }}>
-                    {m.yes_bid}¢
+              {filteredDraftedBy.slice(0, 20).map(([player, teams]) => (
+                <div key={player} style={{ marginBottom: 14 }}>
+                  <div style={{ fontSize: 14, fontWeight: 800, color: '#3b82f6', marginBottom: 4, padding: '4px 0', borderBottom: '1px solid #1e293b' }}>
+                    {player}
                   </div>
-                  <div style={{ fontSize: 12, color: '#94a3b8', fontVariantNumeric: 'tabular-nums', minWidth: 50, textAlign: 'right' }}>
-                    {m.volume?.toLocaleString()}
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                    {teams.map(t => (
+                      <div key={t.team} style={{
+                        padding: '6px 10px', background: '#1e293b', borderRadius: 6,
+                        fontSize: 12, color: t.bid > 10 ? '#22c55e' : '#94a3b8',
+                        fontWeight: t.bid > 10 ? 700 : 400,
+                      }}>
+                        {t.team} <span style={{ fontVariantNumeric: 'tabular-nums' }}>{t.bid}¢</span>
+                      </div>
+                    ))}
                   </div>
                 </div>
               ))}
+              {!draftedBySearch && <div style={{ textAlign: 'center', color: '#475569', padding: 10, fontSize: 12 }}>Showing top 20 · search to filter</div>}
             </div>
-          ))}
-        </div>
-      )}
-
-      {draftData && !loading && category === 'team_pos' && (
-        <div>
-          {Object.entries(draftData).map(([team, positions]) => (
-            <div key={team} style={{ marginBottom: 14 }}>
-              <div style={{ fontSize: 14, fontWeight: 800, color: '#f59e0b', marginBottom: 4, padding: '4px 0', borderBottom: '1px solid #1e293b' }}>
-                {team}
-              </div>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-                {positions.map(p => (
-                  <div key={p.pos} style={{
-                    padding: '6px 10px', background: '#1e293b', borderRadius: 6,
-                    fontSize: 12, color: p.bid > 20 ? '#22c55e' : '#94a3b8',
-                    fontWeight: p.bid > 20 ? 700 : 400,
-                  }}>
-                    {p.pos} <span style={{ fontVariantNumeric: 'tabular-nums' }}>{p.bid}¢</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {draftData && !loading && category === 'drafted_by' && (
-        <div>
-          {Object.entries(draftData).map(([player, teams]) => (
-            <div key={player} style={{ marginBottom: 14 }}>
-              <div style={{ fontSize: 14, fontWeight: 800, color: '#3b82f6', marginBottom: 4, padding: '4px 0', borderBottom: '1px solid #1e293b' }}>
-                {player}
-              </div>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-                {teams.map(t => (
-                  <div key={t.team} style={{
-                    padding: '6px 10px', background: '#1e293b', borderRadius: 6,
-                    fontSize: 12, color: t.bid > 10 ? '#22c55e' : '#94a3b8',
-                    fontWeight: t.bid > 10 ? 700 : 400,
-                  }}>
-                    {t.team} <span style={{ fontVariantNumeric: 'tabular-nums' }}>{t.bid}¢</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          ))}
-        </div>
+          )
       )}
     </div>
   )
