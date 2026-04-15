@@ -1519,3 +1519,177 @@ async def kalshi_ws_proxy(websocket: WebSocket, ticker: str = "", game_key: str 
         await websocket.close()
     except Exception:
         pass
+
+
+# ---------------------------------------------------------------------------
+# NFL Draft Markets (Kalshi)
+# ---------------------------------------------------------------------------
+
+def _kalshi_auth(method: str, path: str) -> dict:
+    """Build Kalshi auth headers."""
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
+    from pathlib import Path
+
+    key_id = os.environ.get("KALSHI_API_KEY_ID", "")
+    if not key_id:
+        return {}
+    key_path = os.environ.get("KALSHI_PRIVATE_KEY_PATH", "")
+    if not key_path or not os.path.exists(key_path):
+        key_path = os.path.join(os.path.dirname(__file__), "kalshi.key")
+    with open(key_path, "rb") as f:
+        key_bytes = f.read()
+    private_key = serialization.load_pem_private_key(key_bytes, password=None)
+    ts = str(int(time.time() * 1000))
+    msg = (ts + method.upper() + path).encode()
+    sig = private_key.sign(
+        msg,
+        asym_padding.PSS(mgf=asym_padding.MGF1(hashes.SHA256()), salt_length=asym_padding.PSS.MAX_LENGTH),
+        hashes.SHA256(),
+    )
+    return {
+        "KALSHI-ACCESS-KEY": key_id,
+        "KALSHI-ACCESS-TIMESTAMP": ts,
+        "KALSHI-ACCESS-SIGNATURE": base64.b64encode(sig).decode(),
+    }
+
+
+async def _fetch_kalshi_series(series_ticker: str) -> list:
+    """Fetch all markets under a Kalshi series ticker."""
+    import httpx
+    base = "https://api.elections.kalshi.com/trade-api/v2"
+    all_markets = []
+    cursor = None
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        while True:
+            path = "/trade-api/v2/markets"
+            headers = _kalshi_auth("GET", path)
+            headers["accept"] = "application/json"
+            params = {"series_ticker": series_ticker, "limit": 200}
+            if cursor:
+                params["cursor"] = cursor
+            r = await client.get(f"{base}/markets", headers=headers, params=params)
+            if r.status_code != 200:
+                break
+            data = r.json()
+            all_markets.extend(data.get("markets", []))
+            cursor = data.get("cursor")
+            if not cursor or not data.get("markets"):
+                break
+    return all_markets
+
+
+def _parse_price(market: dict, field: str) -> int:
+    v = market.get(f"{field}_dollars") or market.get(field, 0)
+    if v is None:
+        return 0
+    v = float(v)
+    return int(round(v * 100)) if v < 1.1 else int(v)
+
+
+@app.get("/api/nfl/draft")
+async def nfl_draft(category: str = "top"):
+    """NFL Draft markets from Kalshi.
+
+    category: top (1st round), pick (by pick #), team_pos, drafted_by
+    """
+    series_map = {
+        "top": "KXNFLDRAFTTOP",
+        "pick": "KXNFLDRAFTTOP",
+        "team_pos": "KXNFLTEAM1POS",
+        "drafted_by": "KXNFLDRAFTTEAM",
+    }
+    series = series_map.get(category)
+    if not series:
+        raise HTTPException(400, "Invalid category")
+
+    markets = await _fetch_kalshi_series(series)
+
+    if category == "top":
+        # Filter to R1 only, sorted by bid desc
+        r1 = [m for m in markets if "-R1-" in m.get("ticker", "")]
+        result = []
+        for m in sorted(r1, key=lambda x: -_parse_price(x, "yes_bid")):
+            result.append({
+                "ticker": m["ticker"],
+                "name": m.get("yes_sub_title") or m.get("title", ""),
+                "subtitle": m.get("title", ""),
+                "yes_bid": _parse_price(m, "yes_bid"),
+                "yes_ask": _parse_price(m, "yes_ask"),
+                "last_price": _parse_price(m, "last_price"),
+                "volume": int(float(m.get("volume_fp", 0) or 0)),
+            })
+        return result
+
+    elif category == "pick":
+        # Group by pick number (3, 5, 10 = top N)
+        picks = {}
+        for m in markets:
+            ticker = m.get("ticker", "")
+            parts = ticker.split("-")
+            if len(parts) < 4:
+                continue
+            pick_part = parts[2]  # R1, 3, 5, 10
+            if pick_part == "R1":
+                continue  # skip R1 (shown in 'top')
+            name = m.get("yes_sub_title") or m.get("no_sub_title", "")
+            bid = _parse_price(m, "yes_bid")
+            vol = int(float(m.get("volume_fp", 0) or 0))
+            label = f"Top {pick_part}"
+            if label not in picks:
+                picks[label] = []
+            picks[label].append({
+                "ticker": ticker,
+                "name": name,
+                "yes_bid": bid,
+                "volume": vol,
+            })
+        # Sort each pick group by bid desc
+        for k in picks:
+            picks[k] = sorted(picks[k], key=lambda x: -x["yes_bid"])
+        return picks
+
+    elif category == "team_pos":
+        teams = {}
+        for m in markets:
+            ticker = m.get("ticker", "")
+            parts = ticker.split("-")
+            if len(parts) < 3:
+                continue
+            team = parts[1].replace("26", "")
+            pos = parts[2]
+            bid = _parse_price(m, "yes_bid")
+            ask = _parse_price(m, "yes_ask")
+            last = _parse_price(m, "last_price")
+            if team not in teams:
+                teams[team] = []
+            teams[team].append({"pos": pos, "bid": bid, "ask": ask, "last": last})
+        for t in teams:
+            teams[t] = sorted(teams[t], key=lambda x: -x["bid"])
+        return dict(sorted(teams.items()))
+
+    elif category == "drafted_by":
+        players = {}
+        for m in markets:
+            ticker = m.get("ticker", "")
+            parts = ticker.split("-")
+            if len(parts) < 3:
+                continue
+            player_code = parts[1].replace("26", "")
+            team = parts[2]
+            bid = _parse_price(m, "yes_bid")
+            name = m.get("yes_sub_title") or ""
+            if player_code not in players:
+                players[player_code] = {"name": name, "teams": []}
+            elif name and not players[player_code]["name"]:
+                players[player_code]["name"] = name
+            players[player_code]["teams"].append({"team": team, "bid": bid})
+
+        # Sort players by max bid desc, teams within player by bid desc
+        result = {}
+        for code in sorted(players.keys(), key=lambda c: -max(t["bid"] for t in players[c]["teams"])):
+            info = players[code]
+            active_teams = [t for t in info["teams"] if t["bid"] > 0]
+            if active_teams:
+                result[info["name"] or code] = sorted(active_teams, key=lambda x: -x["bid"])
+        return result

@@ -2315,38 +2315,227 @@ const nudgeBtn = {
   display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0,
 }
 
+// ── NFL Draft Tab ─────────────────────────────────────────────────────────────
+function NFLDraftTab() {
+  const [draftData, setDraftData] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [category, setCategory] = useState('top')
+  const [error, setError] = useState(null)
+
+  useEffect(() => {
+    setLoading(true)
+    setError(null)
+    fetch(`${API}/api/nfl/draft?category=${category}`)
+      .then(r => r.json())
+      .then(data => { setDraftData(data); setLoading(false) })
+      .catch(e => { setError(e.message); setLoading(false) })
+  }, [category])
+
+  const categories = [
+    { id: 'top', label: 'Round 1' },
+    { id: 'pick', label: 'Top N' },
+    { id: 'team_pos', label: 'Team Pos' },
+    { id: 'drafted_by', label: 'Drafted By' },
+  ]
+
+  return (
+    <div>
+      {/* Category switcher */}
+      <div style={{ display: 'flex', borderRadius: 8, overflow: 'hidden', border: '1px solid #1e293b', marginBottom: 16, background: '#1e293b' }}>
+        {categories.map(c => (
+          <button key={c.id} onClick={() => setCategory(c.id)} style={{
+            flex: 1, padding: '8px 0', border: 'none', fontSize: 12, fontWeight: 600,
+            background: category === c.id ? '#7c3aed' : 'transparent',
+            color: category === c.id ? '#fff' : '#64748b',
+            cursor: 'pointer', transition: 'background 0.15s',
+          }}>{c.label}</button>
+        ))}
+      </div>
+
+      {loading && <div style={{ textAlign: 'center', color: '#475569', padding: 40 }}>Loading draft markets...</div>}
+      {error && <div style={{ textAlign: 'center', color: '#ef4444', padding: 20 }}>Error: {error}</div>}
+
+      {draftData && !loading && category === 'top' && (
+        <div>
+          {draftData.map((m, i) => (
+            <div key={m.ticker} style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+              padding: '10px 12px', background: i % 2 === 0 ? '#1e293b' : '#0f172a',
+              borderRadius: 6, marginBottom: 2,
+            }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 14, fontWeight: 600, color: '#e2e8f0' }}>{m.name}</div>
+                <div style={{ fontSize: 11, color: '#64748b' }}>{m.subtitle || m.ticker}</div>
+              </div>
+              <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+                <div style={{ textAlign: 'right' }}>
+                  <div style={{ fontSize: 11, color: '#64748b' }}>Bid/Ask</div>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: '#22c55e', fontVariantNumeric: 'tabular-nums' }}>
+                    {m.yes_bid}¢ / {m.yes_ask}¢
+                  </div>
+                </div>
+                <div style={{ textAlign: 'right', minWidth: 50 }}>
+                  <div style={{ fontSize: 11, color: '#64748b' }}>Last</div>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: '#f1f5f9', fontVariantNumeric: 'tabular-nums' }}>
+                    {m.last_price}¢
+                  </div>
+                </div>
+                <div style={{ textAlign: 'right', minWidth: 50 }}>
+                  <div style={{ fontSize: 11, color: '#64748b' }}>Vol</div>
+                  <div style={{ fontSize: 12, color: '#94a3b8', fontVariantNumeric: 'tabular-nums' }}>
+                    {m.volume?.toLocaleString()}
+                  </div>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {draftData && !loading && category === 'pick' && (
+        <div>
+          {Object.entries(draftData).map(([pick, players]) => (
+            <div key={pick} style={{ marginBottom: 16 }}>
+              <div style={{ fontSize: 14, fontWeight: 800, color: '#7c3aed', marginBottom: 6, padding: '4px 0', borderBottom: '1px solid #1e293b' }}>
+                Pick #{pick}
+              </div>
+              {players.map((m, i) => (
+                <div key={m.ticker} style={{
+                  display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                  padding: '8px 12px', background: i % 2 === 0 ? '#1e293b' : 'transparent',
+                  borderRadius: 4,
+                }}>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: '#e2e8f0', flex: 1 }}>{m.name}</div>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: '#22c55e', fontVariantNumeric: 'tabular-nums', minWidth: 60, textAlign: 'right' }}>
+                    {m.yes_bid}¢
+                  </div>
+                  <div style={{ fontSize: 12, color: '#94a3b8', fontVariantNumeric: 'tabular-nums', minWidth: 50, textAlign: 'right' }}>
+                    {m.volume?.toLocaleString()}
+                  </div>
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {draftData && !loading && category === 'team_pos' && (
+        <div>
+          {Object.entries(draftData).map(([team, positions]) => (
+            <div key={team} style={{ marginBottom: 14 }}>
+              <div style={{ fontSize: 14, fontWeight: 800, color: '#f59e0b', marginBottom: 4, padding: '4px 0', borderBottom: '1px solid #1e293b' }}>
+                {team}
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                {positions.map(p => (
+                  <div key={p.pos} style={{
+                    padding: '6px 10px', background: '#1e293b', borderRadius: 6,
+                    fontSize: 12, color: p.bid > 20 ? '#22c55e' : '#94a3b8',
+                    fontWeight: p.bid > 20 ? 700 : 400,
+                  }}>
+                    {p.pos} <span style={{ fontVariantNumeric: 'tabular-nums' }}>{p.bid}¢</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {draftData && !loading && category === 'drafted_by' && (
+        <div>
+          {Object.entries(draftData).map(([player, teams]) => (
+            <div key={player} style={{ marginBottom: 14 }}>
+              <div style={{ fontSize: 14, fontWeight: 800, color: '#3b82f6', marginBottom: 4, padding: '4px 0', borderBottom: '1px solid #1e293b' }}>
+                {player}
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                {teams.map(t => (
+                  <div key={t.team} style={{
+                    padding: '6px 10px', background: '#1e293b', borderRadius: 6,
+                    fontSize: 12, color: t.bid > 10 ? '#22c55e' : '#94a3b8',
+                    fontWeight: t.bid > 10 ? 700 : 400,
+                  }}>
+                    {t.team} <span style={{ fontVariantNumeric: 'tabular-nums' }}>{t.bid}¢</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Root App ──────────────────────────────────────────────────────────────────
 export default function App() {
+  const [sport, setSport] = useState('mlb')
   const [tab, setTab] = useState('research')
+
+  const mlbTabs = [
+    { id: 'research', label: '🔍 Research' },
+    { id: 'sim',      label: '⚾ Sim' },
+    { id: 'plakata',  label: '💥 Plakata' },
+    { id: 'spring',   label: '🌸 Odds' },
+  ]
+
+  const nflTabs = [
+    { id: 'draft', label: '📋 Draft' },
+  ]
+
+  const activeTabs = sport === 'mlb' ? mlbTabs : nflTabs
+
+  // Reset tab when switching sports
+  const switchSport = (s) => {
+    setSport(s)
+    setTab(s === 'mlb' ? 'research' : 'draft')
+  }
 
   return (
     <div style={{ maxWidth: 480, margin: '0 auto', padding: '16px 16px 60px', fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif', color: '#f1f5f9', background: '#0f172a', minHeight: '100vh' }}>
 
+      {/* Sport selector */}
+      <div style={{ display: 'flex', justifyContent: 'center', gap: 8, marginBottom: 16 }}>
+        {[
+          { id: 'mlb', label: '⚾ MLB' },
+          { id: 'nfl', label: '🏈 NFL' },
+        ].map(s => (
+          <button key={s.id} onClick={() => switchSport(s.id)} style={{
+            padding: '8px 24px', border: 'none', borderRadius: 20, fontSize: 14, fontWeight: 700,
+            background: sport === s.id ? '#2563eb' : '#1e293b',
+            color: sport === s.id ? '#fff' : '#64748b',
+            cursor: 'pointer', transition: 'all 0.15s',
+          }}>{s.label}</button>
+        ))}
+      </div>
+
       {/* Header */}
       <div style={{ textAlign: 'center', marginBottom: 20 }}>
-        <div style={{ fontSize: 24, marginBottom: 2 }}>⚾</div>
-        <h1 style={{ fontSize: 20, fontWeight: 800, letterSpacing: '-0.03em', margin: 0 }}>MLB Dashboard</h1>
-        <p style={{ fontSize: 12, color: '#475569', marginTop: 2 }}>Statcast 2023–2025</p>
+        <h1 style={{ fontSize: 20, fontWeight: 800, letterSpacing: '-0.03em', margin: 0 }}>
+          {sport === 'mlb' ? 'MLB Dashboard' : 'NFL Dashboard'}
+        </h1>
+        <p style={{ fontSize: 12, color: '#475569', marginTop: 2 }}>
+          {sport === 'mlb' ? 'Statcast 2023–2026' : 'Draft Markets · Kalshi'}
+        </p>
       </div>
 
       {/* Tab switcher */}
       <div style={{ display: 'flex', borderRadius: 10, overflow: 'hidden', border: '1px solid #1e293b', marginBottom: 20, background: '#1e293b' }}>
-        {[
-          { id: 'research', label: '🔍 Research' },
-          { id: 'sim',      label: '⚾ Sim' },
-          { id: 'plakata',  label: '💥 Plakata' },
-          { id: 'spring',   label: '🌸 Odds' },
-        ].map(t => (
+        {activeTabs.map(t => (
           <button key={t.id} onClick={() => setTab(t.id)} style={{
             flex: 1, padding: '11px 0', border: 'none', fontSize: 13, fontWeight: 600,
-            background: tab === t.id ? '#2563eb' : 'transparent',
+            background: tab === t.id ? (sport === 'mlb' ? '#2563eb' : '#7c3aed') : 'transparent',
             color: tab === t.id ? '#fff' : '#64748b',
             cursor: 'pointer', transition: 'background 0.15s',
           }}>{t.label}</button>
         ))}
       </div>
 
-      {tab === 'research' ? <ResearchTab /> : tab === 'sim' ? <AtBatTab /> : tab === 'plakata' ? <PlakataTab /> : <SpringOddsTab />}
+      {sport === 'mlb' && (
+        tab === 'research' ? <ResearchTab /> : tab === 'sim' ? <AtBatTab /> : tab === 'plakata' ? <PlakataTab /> : <SpringOddsTab />
+      )}
+      {sport === 'nfl' && <NFLDraftTab />}
 
       <style>{`
         * { box-sizing: border-box; }
