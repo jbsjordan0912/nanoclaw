@@ -1572,6 +1572,7 @@ async def nfl_draft(category: str = "top"):
     if category == "top":
         markets = await _fetch_kalshi_series("KXNFLDRAFTTOP")
         # Group by tier: R1, Top 3, Top 5, Top 10
+        tier_order = ["Round 1", "Top 3", "Top 5", "Top 10"]
         groups = {}
         for m in markets:
             ticker = m.get("ticker", "")
@@ -1593,7 +1594,44 @@ async def nfl_draft(category: str = "top"):
             groups.setdefault(label, []).append(row)
         for k in groups:
             groups[k] = sorted(groups[k], key=lambda x: -x["yes_bid"])
-        return groups
+        # Return in order: Round 1, Top 3, Top 5, Top 10
+        return {k: groups[k] for k in tier_order if k in groups}
+
+    elif category == "by_pick":
+        # Individual pick markets: who goes #1 through #10
+        pick1 = await _fetch_kalshi_series("KXNFLDRAFT1")
+        picks = await _fetch_kalshi_series("KXNFLDRAFTPICK")
+        all_markets = pick1 + picks
+        groups = {}
+        for m in all_markets:
+            ticker = m.get("ticker", "")
+            parts = ticker.split("-")
+            # KXNFLDRAFT1-26-FMEN (pick 1) or KXNFLDRAFTPICK-26-3-FMEN (picks 2-10)
+            if "KXNFLDRAFT1-" in ticker:
+                pick_num = 1
+            elif len(parts) >= 4:
+                try:
+                    pick_num = int(parts[2])
+                except ValueError:
+                    continue
+            else:
+                continue
+            label = f"Pick #{pick_num}"
+            name = m.get("yes_sub_title") or m.get("no_sub_title", "")
+            row = {
+                "ticker": ticker,
+                "name": name,
+                "yes_bid": _parse_price(m, "yes_bid"),
+                "yes_ask": _parse_price(m, "yes_ask"),
+                "last_price": _parse_price(m, "last_price"),
+                "volume": int(float(m.get("volume_fp", 0) or 0)),
+            }
+            groups.setdefault(label, []).append(row)
+        for k in groups:
+            groups[k] = sorted(groups[k], key=lambda x: -x["yes_bid"])
+        # Return in order: Pick #1 through #10
+        ordered = {f"Pick #{i}": groups.get(f"Pick #{i}", []) for i in range(1, 11)}
+        return {k: v for k, v in ordered.items() if v}
 
     elif category == "positional":
         pos_series = {
@@ -1713,4 +1751,7 @@ async def nfl_draft_positional(position: str = "QB"):
 
     for k in groups:
         groups[k] = sorted(groups[k], key=lambda x: -x["yes_bid"])
-    return groups
+    # Return in ordinal order: 1st, 2nd, 3rd, 4th, 5th
+    pos_upper = position.upper()
+    ordered_keys = [f"{o} {pos_upper}" for o in ["1st", "2nd", "3rd", "4th", "5th"]]
+    return {k: groups[k] for k in ordered_keys if k in groups}

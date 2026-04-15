@@ -2388,6 +2388,11 @@ function NFLDraftTab() {
   const [draftTier, setDraftTier] = useState('')
   const [draftTiers, setDraftTiers] = useState([])
 
+  // By Pick state (Pick #1 through #10)
+  const [pickData, setPickData] = useState(null)
+  const [pickLoading, setPickLoading] = useState(false)
+  const [pickNum, setPickNum] = useState('')
+
   // Positional state
   const [posData, setPosData] = useState(null)
   const [posLoading, setPosLoading] = useState(false)
@@ -2405,6 +2410,17 @@ function NFLDraftTab() {
   const [draftedBySearch, setDraftedBySearch] = useState('')
 
   const [error, setError] = useState(null)
+
+  // Load By Pick data when pick selected
+  useEffect(() => {
+    if (pickNum && !pickData && !pickLoading) {
+      setPickLoading(true)
+      fetch(`${API}/api/nfl/draft?category=by_pick`)
+        .then(r => r.json())
+        .then(data => { setPickData(data); setPickLoading(false) })
+        .catch(e => { setError(e.message); setPickLoading(false) })
+    }
+  }, [pickNum])
 
   // Load Draft Board when tab selected
   useEffect(() => {
@@ -2501,24 +2517,47 @@ function NFLDraftTab() {
 
       {error && <div style={{ textAlign: 'center', color: '#ef4444', padding: 20 }}>Error: {error}</div>}
 
-      {/* ── Draft Board (Round 1 + Top N) ── */}
+      {/* ── Draft Board (Round 1 + Top N + By Pick) ── */}
       {category === 'draft' && (
         draftLoading
           ? <div style={{ textAlign: 'center', color: '#475569', padding: 40 }}>Loading...</div>
           : draftData && (
             <div>
-              {/* Multi-select tier buttons */}
+              {/* Tier buttons */}
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 14 }}>
                 {draftTiers.map(t => (
-                  <button key={t} onClick={() => setDraftTier(t)} style={{
+                  <button key={t} onClick={() => { setDraftTier(t); setPickNum('') }} style={{
                     padding: '6px 14px', borderRadius: 16, border: 'none', fontSize: 12, fontWeight: 600,
-                    background: draftTier === t ? '#7c3aed' : '#1e293b',
-                    color: draftTier === t ? '#fff' : '#94a3b8',
+                    background: draftTier === t && !pickNum ? '#7c3aed' : '#1e293b',
+                    color: draftTier === t && !pickNum ? '#fff' : '#94a3b8',
                     cursor: 'pointer', transition: 'all 0.15s',
                   }}>{t}</button>
                 ))}
+                {/* By Pick dropdown */}
+                <select value={pickNum} onChange={e => { setPickNum(e.target.value); if (e.target.value) setDraftTier('') }} style={{
+                  padding: '6px 12px', borderRadius: 16, border: 'none', fontSize: 12, fontWeight: 600,
+                  background: pickNum ? '#7c3aed' : '#1e293b',
+                  color: pickNum ? '#fff' : '#94a3b8',
+                  cursor: 'pointer', outline: 'none',
+                }}>
+                  <option value="">By Pick #</option>
+                  {[1,2,3,4,5,6,7,8,9,10].map(n => (
+                    <option key={n} value={`Pick #${n}`}>Pick #{n}</option>
+                  ))}
+                </select>
               </div>
-              {draftTier && draftData[draftTier] && draftData[draftTier]
+
+              {/* Show tier data */}
+              {draftTier && !pickNum && draftData[draftTier] && draftData[draftTier]
+                .filter(m => m.yes_bid > 0 || m.volume > 0)
+                .map((m, i) => (
+                  <DraftRow key={m.ticker} i={i} name={m.name} bid={m.yes_bid} ask={m.yes_ask} last={m.last_price} volume={m.volume} />
+                ))
+              }
+
+              {/* Show pick data */}
+              {pickNum && pickLoading && <div style={{ textAlign: 'center', color: '#475569', padding: 40 }}>Loading...</div>}
+              {pickNum && pickData && pickData[pickNum] && pickData[pickNum]
                 .filter(m => m.yes_bid > 0 || m.volume > 0)
                 .map((m, i) => (
                   <DraftRow key={m.ticker} i={i} name={m.name} bid={m.yes_bid} ask={m.yes_ask} last={m.last_price} volume={m.volume} />
