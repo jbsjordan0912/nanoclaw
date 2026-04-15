@@ -1567,63 +1567,50 @@ def _parse_price(market: dict, field: str) -> int:
 async def nfl_draft(category: str = "top"):
     """NFL Draft markets from Kalshi.
 
-    category: top (1st round), pick (by pick #), team_pos, drafted_by
+    category: top (round 1 + top N), team_pos, drafted_by, positional
     """
-    series_map = {
-        "top": "KXNFLDRAFTTOP",
-        "pick": "KXNFLDRAFTTOP",
-        "team_pos": "KXNFLTEAM1POS",
-        "drafted_by": "KXNFLDRAFTTEAM",
-    }
-    series = series_map.get(category)
-    if not series:
-        raise HTTPException(400, "Invalid category")
-
-    markets = await _fetch_kalshi_series(series)
-
     if category == "top":
-        # Filter to R1 only, sorted by bid desc
-        r1 = [m for m in markets if "-R1-" in m.get("ticker", "")]
-        result = []
-        for m in sorted(r1, key=lambda x: -_parse_price(x, "yes_bid")):
-            result.append({
-                "ticker": m["ticker"],
-                "name": m.get("yes_sub_title") or m.get("title", ""),
-                "subtitle": m.get("title", ""),
-                "yes_bid": _parse_price(m, "yes_bid"),
-                "yes_ask": _parse_price(m, "yes_ask"),
-                "last_price": _parse_price(m, "last_price"),
-                "volume": int(float(m.get("volume_fp", 0) or 0)),
-            })
-        return result
-
-    elif category == "pick":
-        # Group by pick number (3, 5, 10 = top N)
-        picks = {}
+        markets = await _fetch_kalshi_series("KXNFLDRAFTTOP")
+        # Group by tier: R1, Top 3, Top 5, Top 10
+        groups = {}
         for m in markets:
             ticker = m.get("ticker", "")
             parts = ticker.split("-")
             if len(parts) < 4:
                 continue
-            pick_part = parts[2]  # R1, 3, 5, 10
-            if pick_part == "R1":
-                continue  # skip R1 (shown in 'top')
+            tier = parts[2]  # R1, 3, 5, 10
+            label = "Round 1" if tier == "R1" else f"Top {tier}"
             name = m.get("yes_sub_title") or m.get("no_sub_title", "")
-            bid = _parse_price(m, "yes_bid")
-            vol = int(float(m.get("volume_fp", 0) or 0))
-            label = f"Top {pick_part}"
-            if label not in picks:
-                picks[label] = []
-            picks[label].append({
+            row = {
                 "ticker": ticker,
                 "name": name,
-                "yes_bid": bid,
-                "volume": vol,
-            })
-        # Sort each pick group by bid desc
-        for k in picks:
-            picks[k] = sorted(picks[k], key=lambda x: -x["yes_bid"])
-        return picks
+                "subtitle": m.get("title", ""),
+                "yes_bid": _parse_price(m, "yes_bid"),
+                "yes_ask": _parse_price(m, "yes_ask"),
+                "last_price": _parse_price(m, "last_price"),
+                "volume": int(float(m.get("volume_fp", 0) or 0)),
+            }
+            groups.setdefault(label, []).append(row)
+        for k in groups:
+            groups[k] = sorted(groups[k], key=lambda x: -x["yes_bid"])
+        return groups
+
+    elif category == "positional":
+        pos_series = {
+            "QB": "KXNFLDRAFTQB",
+            "WR": "KXNFLDRAFTWR",
+            "RB": "KXNFLDRAFTRB",
+            "TE": "KXNFLDRAFTTE",
+            "OL": "KXNFLDRAFTOL",
+            "EDGE": "KXNFLDRAFTEDGE",
+            "LB": "KXNFLDRAFTLB",
+            "DB": "KXNFLDRAFTDB",
+        }
+        return {"positions": list(pos_series.keys())}
+
+    elif category == "positional_detail":
+        # Fetch a specific position's markets
+        return {}  # handled by /api/nfl/draft/positional endpoint below
 
     elif category == "team_pos":
         teams = {}
@@ -1669,3 +1656,54 @@ async def nfl_draft(category: str = "top"):
             if active_teams:
                 result[info["name"] or code] = sorted(active_teams, key=lambda x: -x["bid"])
         return result
+
+
+@app.get("/api/nfl/draft/positional")
+async def nfl_draft_positional(position: str = "QB"):
+    """NFL Draft positional order markets from Kalshi.
+
+    position: QB, WR, RB, TE, OL, EDGE, LB, DB
+    """
+    pos_series = {
+        "QB": "KXNFLDRAFTQB",
+        "WR": "KXNFLDRAFTWR",
+        "RB": "KXNFLDRAFTRB",
+        "TE": "KXNFLDRAFTTE",
+        "OL": "KXNFLDRAFTOL",
+        "EDGE": "KXNFLDRAFTEDGE",
+        "LB": "KXNFLDRAFTLB",
+        "DB": "KXNFLDRAFTDB",
+    }
+    series = pos_series.get(position.upper())
+    if not series:
+        raise HTTPException(400, f"Invalid position. Choose from: {', '.join(pos_series.keys())}")
+
+    markets = await _fetch_kalshi_series(series)
+
+    # Group by ordinal (P1, P2, P3, etc.)
+    groups = {}
+    ordinal_labels = {"P1": "1st", "P2": "2nd", "P3": "3rd", "P4": "4th", "P5": "5th"}
+    for m in markets:
+        ticker = m.get("ticker", "")
+        parts = ticker.split("-")
+        if len(parts) < 3:
+            continue
+        ord_code = parts[1].replace("26", "")  # e.g. P2
+        label = f"{ordinal_labels.get(ord_code, ord_code)} {position.upper()}"
+        name = m.get("yes_sub_title") or m.get("no_sub_title", "")
+        bid = _parse_price(m, "yes_bid")
+        ask = _parse_price(m, "yes_ask")
+        last = _parse_price(m, "last_price")
+        vol = int(float(m.get("volume_fp", 0) or 0))
+        groups.setdefault(label, []).append({
+            "ticker": ticker,
+            "name": name,
+            "yes_bid": bid,
+            "yes_ask": ask,
+            "last_price": last,
+            "volume": vol,
+        })
+
+    for k in groups:
+        groups[k] = sorted(groups[k], key=lambda x: -x["yes_bid"])
+    return groups

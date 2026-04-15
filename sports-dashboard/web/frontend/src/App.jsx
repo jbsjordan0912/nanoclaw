@@ -2380,16 +2380,19 @@ function DraftSelect({ label, value, options, onChange }) {
 
 // ── NFL Draft Tab ─────────────────────────────────────────────────────────────
 function NFLDraftTab() {
-  const [category, setCategory] = useState('top')
+  const [category, setCategory] = useState('draft')
 
-  // Round 1 state
-  const [r1Data, setR1Data] = useState(null)
-  const [r1Loading, setR1Loading] = useState(false)
+  // Draft Board state (Round 1 + Top N combined)
+  const [draftData, setDraftData] = useState(null)
+  const [draftLoading, setDraftLoading] = useState(false)
+  const [draftTier, setDraftTier] = useState('')
+  const [draftTiers, setDraftTiers] = useState([])
 
-  // Top N state
-  const [topNData, setTopNData] = useState(null)
-  const [topNLoading, setTopNLoading] = useState(false)
-  const [topNPick, setTopNPick] = useState('')
+  // Positional state
+  const [posData, setPosData] = useState(null)
+  const [posLoading, setPosLoading] = useState(false)
+  const [posPosition, setPosPosition] = useState('')
+  const [posOrdinal, setPosOrdinal] = useState('')
 
   // Team Pos state
   const [teamPosData, setTeamPosData] = useState(null)
@@ -2403,25 +2406,40 @@ function NFLDraftTab() {
 
   const [error, setError] = useState(null)
 
-  // Load Round 1 on mount (small dataset)
+  // Load Draft Board when tab selected
   useEffect(() => {
-    setR1Loading(true)
-    fetch(`${API}/api/nfl/draft?category=top`)
-      .then(r => r.json())
-      .then(data => { setR1Data(data); setR1Loading(false) })
-      .catch(e => { setError(e.message); setR1Loading(false) })
-  }, [])
-
-  // Load Top N when category selected (cached after first load)
-  useEffect(() => {
-    if (category === 'pick' && !topNData && !topNLoading) {
-      setTopNLoading(true)
-      fetch(`${API}/api/nfl/draft?category=pick`)
+    if (category === 'draft' && !draftData && !draftLoading) {
+      setDraftLoading(true)
+      fetch(`${API}/api/nfl/draft?category=top`)
         .then(r => r.json())
-        .then(data => { setTopNData(data); setTopNLoading(false) })
-        .catch(e => { setError(e.message); setTopNLoading(false) })
+        .then(data => {
+          setDraftData(data)
+          const tiers = Object.keys(data)
+          setDraftTiers(tiers)
+          setDraftTier(tiers[0] || '')
+          setDraftLoading(false)
+        })
+        .catch(e => { setError(e.message); setDraftLoading(false) })
     }
   }, [category])
+
+  // Load Positional when position changes
+  useEffect(() => {
+    if (category === 'positional' && posPosition) {
+      setPosLoading(true)
+      setPosData(null)
+      setPosOrdinal('')
+      fetch(`${API}/api/nfl/draft/positional?position=${posPosition}`)
+        .then(r => r.json())
+        .then(data => {
+          setPosData(data)
+          const keys = Object.keys(data)
+          if (keys.length > 0) setPosOrdinal(keys[0])
+          setPosLoading(false)
+        })
+        .catch(e => { setError(e.message); setPosLoading(false) })
+    }
+  }, [posPosition])
 
   // Load Team Pos when category selected
   useEffect(() => {
@@ -2446,11 +2464,13 @@ function NFLDraftTab() {
   }, [category])
 
   const categories = [
-    { id: 'top', label: 'Round 1' },
-    { id: 'pick', label: 'Top N' },
+    { id: 'draft', label: 'Draft Board' },
+    { id: 'positional', label: 'By Position' },
     { id: 'team_pos', label: 'Team Pos' },
     { id: 'drafted_by', label: 'Drafted By' },
   ]
+
+  const POSITIONS = ['QB', 'WR', 'RB', 'TE', 'OL', 'EDGE', 'LB', 'DB']
 
   const NFL_TEAMS = [
     'ARI','ATL','BAL','BUF','CAR','CHI','CIN','CLE','DAL','DEN','DET','GB',
@@ -2481,33 +2501,71 @@ function NFLDraftTab() {
 
       {error && <div style={{ textAlign: 'center', color: '#ef4444', padding: 20 }}>Error: {error}</div>}
 
-      {/* ── Round 1 ── */}
-      {category === 'top' && (
-        r1Loading
+      {/* ── Draft Board (Round 1 + Top N) ── */}
+      {category === 'draft' && (
+        draftLoading
           ? <div style={{ textAlign: 'center', color: '#475569', padding: 40 }}>Loading...</div>
-          : r1Data && r1Data.map((m, i) => (
-              <DraftRow key={m.ticker} i={i} name={m.name} subtitle={m.subtitle} bid={m.yes_bid} ask={m.yes_ask} last={m.last_price} volume={m.volume} />
-            ))
-      )}
-
-      {/* ── Top N ── */}
-      {category === 'pick' && (
-        topNLoading
-          ? <div style={{ textAlign: 'center', color: '#475569', padding: 40 }}>Loading...</div>
-          : topNData && (
+          : draftData && (
             <div>
-              <DraftSelect label="Draft Position" value={topNPick}
-                options={Object.keys(topNData).map(k => ({ value: k, label: k }))}
-                onChange={setTopNPick} />
-              {topNPick && topNData[topNPick] && topNData[topNPick]
-                .filter(m => m.yes_bid > 0)
+              {/* Multi-select tier buttons */}
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 14 }}>
+                {draftTiers.map(t => (
+                  <button key={t} onClick={() => setDraftTier(t)} style={{
+                    padding: '6px 14px', borderRadius: 16, border: 'none', fontSize: 12, fontWeight: 600,
+                    background: draftTier === t ? '#7c3aed' : '#1e293b',
+                    color: draftTier === t ? '#fff' : '#94a3b8',
+                    cursor: 'pointer', transition: 'all 0.15s',
+                  }}>{t}</button>
+                ))}
+              </div>
+              {draftTier && draftData[draftTier] && draftData[draftTier]
+                .filter(m => m.yes_bid > 0 || m.volume > 0)
                 .map((m, i) => (
-                  <DraftRow key={m.ticker} i={i} name={m.name} bid={m.yes_bid} volume={m.volume} />
+                  <DraftRow key={m.ticker} i={i} name={m.name} bid={m.yes_bid} ask={m.yes_ask} last={m.last_price} volume={m.volume} />
                 ))
               }
-              {!topNPick && <div style={{ textAlign: 'center', color: '#475569', padding: 30, fontSize: 13 }}>Select a draft position above</div>}
             </div>
           )
+      )}
+
+      {/* ── Positional Draft Order ── */}
+      {category === 'positional' && (
+        <div>
+          {/* Position selector */}
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 14 }}>
+            {POSITIONS.map(p => (
+              <button key={p} onClick={() => setPosPosition(p)} style={{
+                padding: '6px 14px', borderRadius: 16, border: 'none', fontSize: 12, fontWeight: 600,
+                background: posPosition === p ? '#7c3aed' : '#1e293b',
+                color: posPosition === p ? '#fff' : '#94a3b8',
+                cursor: 'pointer', transition: 'all 0.15s',
+              }}>{p}</button>
+            ))}
+          </div>
+          {!posPosition && <div style={{ textAlign: 'center', color: '#475569', padding: 30, fontSize: 13 }}>Select a position above</div>}
+          {posLoading && <div style={{ textAlign: 'center', color: '#475569', padding: 40 }}>Loading...</div>}
+          {posData && !posLoading && (
+            <div>
+              {/* Ordinal selector (1st QB, 2nd QB, etc.) */}
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 14 }}>
+                {Object.keys(posData).map(o => (
+                  <button key={o} onClick={() => setPosOrdinal(o)} style={{
+                    padding: '6px 14px', borderRadius: 16, border: 'none', fontSize: 12, fontWeight: 600,
+                    background: posOrdinal === o ? '#3b82f6' : '#1e293b',
+                    color: posOrdinal === o ? '#fff' : '#94a3b8',
+                    cursor: 'pointer', transition: 'all 0.15s',
+                  }}>{o}</button>
+                ))}
+              </div>
+              {posOrdinal && posData[posOrdinal] && posData[posOrdinal]
+                .filter(m => m.yes_bid > 0 || m.volume > 0)
+                .map((m, i) => (
+                  <DraftRow key={m.ticker} i={i} name={m.name} bid={m.yes_bid} ask={m.yes_ask} last={m.last_price} volume={m.volume} />
+                ))
+              }
+            </div>
+          )}
+        </div>
       )}
 
       {/* ── Team Position ── */}
