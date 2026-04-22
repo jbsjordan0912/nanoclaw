@@ -2315,6 +2315,242 @@ const nudgeBtn = {
   display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0,
 }
 
+// ── HR Scanner Tab ───────────────────────────────────────────────────────────
+function HRScannerTab() {
+  const [fvText, setFvText] = useState('')
+  const [margin, setMargin] = useState(20)
+  const [contracts, setContracts] = useState(10)
+  const [results, setResults] = useState(null)
+  const [loading, setLoading] = useState(false)
+  const [orderStatus, setOrderStatus] = useState({}) // ticker -> {status, msg}
+  const [cancelKey, setCancelKey] = useState('')
+  const [gameTime, setGameTime] = useState('') // for auto-cancel
+  const [autoCancelTimer, setAutoCancelTimer] = useState(null)
+
+  const parseFV = () => {
+    // Parse pasted text: "Player Name +500" per line
+    const lines = fvText.trim().split('\n').filter(l => l.trim())
+    const players = []
+    for (const line of lines) {
+      // Match: name followed by +/- number
+      const match = line.match(/^(.+?)\s+([+-]\d+)\s*$/)
+      if (match) {
+        players.push({ name: match[1].trim(), fv: parseInt(match[2]) })
+      }
+    }
+    return players
+  }
+
+  const scan = async () => {
+    const players = parseFV()
+    if (players.length === 0) return
+    setLoading(true)
+    setOrderStatus({})
+    try {
+      const res = await fetch(`${API}/api/hr/scan`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ players, margin, contracts }),
+      })
+      const data = await res.json()
+      setResults(data.results || [])
+    } catch (e) {
+      setResults([])
+    }
+    setLoading(false)
+  }
+
+  const postOrder = async (ticker, side, price) => {
+    const key = `${ticker}-${side}`
+    setOrderStatus(prev => ({ ...prev, [key]: { status: 'posting' } }))
+    try {
+      const res = await fetch(`${API}/api/hr/order`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ticker, side, price, contracts }),
+      })
+      const data = await res.json()
+      if (data.ok) {
+        setOrderStatus(prev => ({ ...prev, [key]: { status: 'posted', msg: `Order placed: ${contracts}x @ ${price}¢` } }))
+      } else {
+        setOrderStatus(prev => ({ ...prev, [key]: { status: 'error', msg: data.error || 'Failed' } }))
+      }
+    } catch (e) {
+      setOrderStatus(prev => ({ ...prev, [key]: { status: 'error', msg: e.message } }))
+    }
+  }
+
+  const cancelGame = async (key) => {
+    try {
+      const res = await fetch(`${API}/api/hr/cancel-game?game_key=${key}`, { method: 'POST' })
+      const data = await res.json()
+      if (data.ok) {
+        alert(`Cancelled ${data.cancelled} orders`)
+        setOrderStatus({})
+      } else {
+        alert(`Error: ${data.error}`)
+      }
+    } catch (e) {
+      alert(e.message)
+    }
+  }
+
+  // Auto-cancel timer
+  const startAutoCancel = () => {
+    if (!gameTime || !cancelKey) return
+    const [h, m] = gameTime.split(':').map(Number)
+    const now = new Date()
+    const target = new Date()
+    target.setHours(h, m, 0, 0)
+    const ms = target - now
+    if (ms <= 0) { alert('Game time is in the past'); return }
+    const timer = setTimeout(() => {
+      cancelGame(cancelKey)
+    }, ms)
+    setAutoCancelTimer(timer)
+    alert(`Auto-cancel set for ${gameTime} (${Math.round(ms / 60000)} min)`)
+  }
+
+  const inputStyle = {
+    padding: '8px 12px', borderRadius: 8, background: '#1e293b',
+    border: '1px solid #334155', color: '#f1f5f9', fontSize: 13,
+    outline: 'none', boxSizing: 'border-box',
+  }
+
+  return (
+    <div>
+      {/* Input area */}
+      <div style={{ marginBottom: 16 }}>
+        <label style={{ display: 'block', fontSize: 11, color: '#94a3b8', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+          Paste Fair Values (one per line: Player Name +odds)
+        </label>
+        <textarea value={fvText} onChange={e => setFvText(e.target.value)}
+          placeholder={"Pete Alonso +504\nGunnar Henderson +591\nBobby Witt Jr. +566"}
+          rows={6}
+          style={{ ...inputStyle, width: '100%', fontFamily: 'monospace', resize: 'vertical' }} />
+      </div>
+
+      {/* Controls */}
+      <div style={{ display: 'flex', gap: 8, marginBottom: 16, alignItems: 'flex-end' }}>
+        <div style={{ flex: 1 }}>
+          <label style={{ display: 'block', fontSize: 11, color: '#94a3b8', marginBottom: 4 }}>Margin %</label>
+          <input type="number" value={margin} onChange={e => setMargin(Number(e.target.value))}
+            style={{ ...inputStyle, width: '100%' }} />
+        </div>
+        <div style={{ flex: 1 }}>
+          <label style={{ display: 'block', fontSize: 11, color: '#94a3b8', marginBottom: 4 }}>Contracts</label>
+          <input type="number" value={contracts} onChange={e => setContracts(Number(e.target.value))}
+            style={{ ...inputStyle, width: '100%' }} />
+        </div>
+        <button onClick={scan} disabled={loading} style={{
+          padding: '8px 20px', borderRadius: 8, border: 'none', fontSize: 13, fontWeight: 700,
+          background: '#2563eb', color: '#fff', cursor: 'pointer', height: 37,
+        }}>{loading ? 'Scanning...' : 'Scan'}</button>
+      </div>
+
+      {/* Auto-cancel controls */}
+      {results && results.length > 0 && (
+        <div style={{ display: 'flex', gap: 8, marginBottom: 16, alignItems: 'flex-end', padding: 10, background: '#1e293b', borderRadius: 8 }}>
+          <div style={{ flex: 1 }}>
+            <label style={{ display: 'block', fontSize: 11, color: '#94a3b8', marginBottom: 4 }}>Game Key (e.g. BALKC)</label>
+            <input value={cancelKey} onChange={e => setCancelKey(e.target.value)}
+              placeholder="BALKC" style={{ ...inputStyle, width: '100%' }} />
+          </div>
+          <div style={{ flex: 1 }}>
+            <label style={{ display: 'block', fontSize: 11, color: '#94a3b8', marginBottom: 4 }}>Cancel at (ET)</label>
+            <input type="time" value={gameTime} onChange={e => setGameTime(e.target.value)}
+              style={{ ...inputStyle, width: '100%' }} />
+          </div>
+          <button onClick={startAutoCancel} style={{
+            padding: '8px 14px', borderRadius: 8, border: 'none', fontSize: 12, fontWeight: 600,
+            background: '#f59e0b', color: '#000', cursor: 'pointer', height: 37, whiteSpace: 'nowrap',
+          }}>Set Timer</button>
+          <button onClick={() => cancelKey && cancelGame(cancelKey)} style={{
+            padding: '8px 14px', borderRadius: 8, border: 'none', fontSize: 12, fontWeight: 600,
+            background: '#ef4444', color: '#fff', cursor: 'pointer', height: 37, whiteSpace: 'nowrap',
+          }}>Cancel Now</button>
+        </div>
+      )}
+
+      {/* Results */}
+      {results && results.map((r, i) => {
+        if (!r.matched) return (
+          <div key={r.name} style={{ padding: '8px 12px', background: '#1e293b', borderRadius: 6, marginBottom: 2, color: '#64748b', fontSize: 13 }}>
+            {r.name} — not found on Kalshi
+          </div>
+        )
+
+        const yesKey = `${r.ticker}-yes`
+        const noKey = `${r.ticker}-no`
+        const yesStatus = orderStatus[yesKey]
+        const noStatus = orderStatus[noKey]
+
+        return (
+          <div key={r.ticker} style={{
+            padding: '12px', background: i % 2 === 0 ? '#1e293b' : '#0f172a',
+            borderRadius: 8, marginBottom: 4,
+            borderLeft: (r.yes_actionable || r.no_actionable) ? '3px solid #22c55e' : '3px solid transparent',
+          }}>
+            {/* Player header */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+              <div style={{ fontSize: 14, fontWeight: 700, color: '#e2e8f0' }}>{r.name}</div>
+              <div style={{ fontSize: 12, color: '#64748b' }}>FV: {r.fv_cents}¢ ({r.fv_american > 0 ? '+' : ''}{r.fv_american})</div>
+            </div>
+
+            {/* YES row */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4, padding: '6px 8px', background: '#0f172a33', borderRadius: 4 }}>
+              <span style={{ fontSize: 12, fontWeight: 700, color: '#22c55e', minWidth: 30 }}>YES</span>
+              <span style={{ fontSize: 12, color: '#94a3b8', fontVariantNumeric: 'tabular-nums' }}>
+                bid:{r.yes_bid}¢ ask:{r.yes_ask}¢
+              </span>
+              <span style={{ fontSize: 11, color: '#64748b' }}>cut:{r.yes_cutoff}¢</span>
+              <span style={{ fontSize: 12, fontWeight: 600, color: r.yes_actionable ? '#22c55e' : '#ef4444', fontVariantNumeric: 'tabular-nums' }}>
+                {r.yes_edge > 0 ? '+' : ''}{r.yes_edge}%
+              </span>
+              {r.yes_actionable && !yesStatus && (
+                <button onClick={() => postOrder(r.ticker, 'yes', r.yes_ask)} style={{
+                  marginLeft: 'auto', padding: '4px 12px', borderRadius: 6, border: 'none',
+                  fontSize: 11, fontWeight: 700, background: '#22c55e', color: '#000', cursor: 'pointer',
+                }}>BUY {r.yes_ask}¢</button>
+              )}
+              {yesStatus && (
+                <span style={{ marginLeft: 'auto', fontSize: 11, color: yesStatus.status === 'posted' ? '#22c55e' : yesStatus.status === 'error' ? '#ef4444' : '#f59e0b' }}>
+                  {yesStatus.status === 'posting' ? '...' : yesStatus.msg}
+                </span>
+              )}
+            </div>
+
+            {/* NO row */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 8px', background: '#0f172a33', borderRadius: 4 }}>
+              <span style={{ fontSize: 12, fontWeight: 700, color: '#ef4444', minWidth: 30 }}>NO</span>
+              <span style={{ fontSize: 12, color: '#94a3b8', fontVariantNumeric: 'tabular-nums' }}>
+                bid:{r.no_bid}¢ ask:{r.no_ask}¢
+              </span>
+              <span style={{ fontSize: 11, color: '#64748b' }}>cut:{r.no_cutoff}¢</span>
+              <span style={{ fontSize: 12, fontWeight: 600, color: r.no_actionable ? '#22c55e' : '#ef4444', fontVariantNumeric: 'tabular-nums' }}>
+                {r.no_edge > 0 ? '+' : ''}{r.no_edge}%
+              </span>
+              {r.no_actionable && !noStatus && (
+                <button onClick={() => postOrder(r.ticker, 'no', r.no_ask)} style={{
+                  marginLeft: 'auto', padding: '4px 12px', borderRadius: 6, border: 'none',
+                  fontSize: 11, fontWeight: 700, background: '#ef4444', color: '#fff', cursor: 'pointer',
+                }}>BUY {r.no_ask}¢</button>
+              )}
+              {noStatus && (
+                <span style={{ marginLeft: 'auto', fontSize: 11, color: noStatus.status === 'posted' ? '#22c55e' : noStatus.status === 'error' ? '#ef4444' : '#f59e0b' }}>
+                  {noStatus.status === 'posting' ? '...' : noStatus.msg}
+                </span>
+              )}
+            </div>
+
+            <div style={{ fontSize: 10, color: '#475569', marginTop: 4 }}>vol: {r.volume?.toLocaleString()}</div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 // ── NFL Draft Market Row ──────────────────────────────────────────────────────
 function DraftRow({ name, subtitle, bid, ask, last, volume, i }) {
   return (
@@ -2678,6 +2914,7 @@ export default function App() {
     { id: 'sim',      label: '⚾ Sim' },
     { id: 'plakata',  label: '💥 Plakata' },
     { id: 'spring',   label: '🌸 Odds' },
+    { id: 'hr',       label: '💣 HR' },
   ]
 
   const nflTabs = [
@@ -2733,7 +2970,7 @@ export default function App() {
       </div>
 
       {sport === 'mlb' && (
-        tab === 'research' ? <ResearchTab /> : tab === 'sim' ? <AtBatTab /> : tab === 'plakata' ? <PlakataTab /> : <SpringOddsTab />
+        tab === 'research' ? <ResearchTab /> : tab === 'sim' ? <AtBatTab /> : tab === 'plakata' ? <PlakataTab /> : tab === 'hr' ? <HRScannerTab /> : <SpringOddsTab />
       )}
       {sport === 'nfl' && <NFLDraftTab />}
 

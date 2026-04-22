@@ -1522,6 +1522,227 @@ async def kalshi_ws_proxy(websocket: WebSocket, ticker: str = "", game_key: str 
 
 
 # ---------------------------------------------------------------------------
+# HR Scanner — compare fair values to Kalshi HR props
+# ---------------------------------------------------------------------------
+
+class HRScanRequest(BaseModel):
+    players: list  # [{name: str, fv: int (American odds)}, ...]
+    margin: float = 20.0  # edge threshold percentage
+    contracts: int = 10  # default contracts per order
+
+
+def _american_to_cents(american: int) -> int:
+    """Convert American odds to Kalshi cents (implied probability)."""
+    if american > 0:
+        prob = 100.0 / (american + 100.0)
+    else:
+        prob = abs(american) / (abs(american) + 100.0)
+    return max(1, min(99, round(prob * 100)))
+
+
+def _fuzzy_match_name(target: str, candidates: list) -> Optional[str]:
+    """Match a player name loosely (handles Jr., accents, etc.)."""
+    target_lower = target.lower().strip().replace(".", "").replace("jr", "").strip()
+    target_parts = set(target_lower.split())
+    best_match = None
+    best_score = 0
+    for name in candidates:
+        name_lower = name.lower().strip().replace(".", "").replace("jr", "").strip()
+        name_parts = set(name_lower.split())
+        # Last name match is most important
+        overlap = len(target_parts & name_parts)
+        if overlap > best_score:
+            best_score = overlap
+            best_match = name
+    return best_match if best_score >= 1 else None
+
+
+@app.post("/api/hr/scan")
+async def hr_scan(req: HRScanRequest):
+    """Scan Kalshi HR markets against fair values.
+
+    Returns YES and NO opportunities with edge calculations.
+    """
+    import httpx
+
+    markets = await _fetch_kalshi_series("KXMLBHR")
+
+    # Filter to 1+ HR, active, today
+    today_str = (datetime.now(timezone.utc) - timedelta(hours=4)).strftime("%y%b%d").upper()
+    # e.g. "26APR22"
+    hr1_today = [
+        m for m in markets
+        if m["ticker"].endswith("-1")
+        and today_str in m["ticker"]
+        and m.get("status") == "active"
+    ]
+
+    # Build name -> market lookup
+    market_by_name = {}
+    for m in hr1_today:
+        title = m.get("title", "")
+        name = title.replace(": 1+ home runs?", "").strip()
+        market_by_name[name] = m
+
+    results = []
+    margin = req.margin / 100.0
+
+    for p in req.players:
+        player_name = p.get("name", "")
+        fv_american = p.get("fv", 0)
+        if not player_name or not fv_american:
+            continue
+
+        fv_cents = _american_to_cents(fv_american)
+        fv_no_cents = 100 - fv_cents
+
+        # Match to Kalshi market
+        matched_name = _fuzzy_match_name(player_name, list(market_by_name.keys()))
+        if not matched_name:
+            results.append({
+                "name": player_name,
+                "fv_american": fv_american,
+                "fv_cents": fv_cents,
+                "matched": False,
+            })
+            continue
+
+        m = market_by_name[matched_name]
+        yes_bid = _parse_price(m, "yes_bid")
+        yes_ask = _parse_price(m, "yes_ask")
+        no_bid = _parse_price(m, "no_bid")
+        no_ask = _parse_price(m, "no_ask")
+        volume = int(float(m.get("volume_fp", 0) or 0))
+        ticker = m["ticker"]
+
+        # Edge calculations
+        # YES edge: buy YES if ask < fv_cents * (1 - margin)
+        yes_cutoff = round(fv_cents * (1 - margin))
+        yes_edge = round((fv_cents - yes_ask) / yes_ask * 100, 1) if yes_ask > 0 else 0
+        yes_actionable = yes_ask <= yes_cutoff and yes_ask > 0
+
+        # NO edge: buy NO if no_ask < fv_no_cents * (1 - margin)
+        # equivalently: yes_bid >= fv_cents * (1 + margin / (1 - margin))
+        no_cutoff = round(fv_no_cents * (1 - margin))
+        no_edge = round((fv_no_cents - no_ask) / no_ask * 100, 1) if no_ask > 0 else 0
+        no_actionable = no_ask <= no_cutoff and no_ask > 0
+
+        results.append({
+            "name": matched_name,
+            "fv_american": fv_american,
+            "fv_cents": fv_cents,
+            "matched": True,
+            "ticker": ticker,
+            "yes_bid": yes_bid,
+            "yes_ask": yes_ask,
+            "no_bid": no_bid,
+            "no_ask": no_ask,
+            "volume": volume,
+            "yes_edge": yes_edge,
+            "yes_cutoff": yes_cutoff,
+            "yes_actionable": yes_actionable,
+            "no_edge": no_edge,
+            "no_cutoff": no_cutoff,
+            "no_actionable": no_actionable,
+        })
+
+    # Sort: actionable first, then by absolute edge
+    results.sort(key=lambda r: (
+        -(1 if r.get("yes_actionable") or r.get("no_actionable") else 0),
+        -abs(r.get("yes_edge", 0) if r.get("yes_actionable") else r.get("no_edge", 0)),
+    ))
+
+    return {"results": results, "margin": req.margin, "today": today_str}
+
+
+class HROrderRequest(BaseModel):
+    ticker: str
+    side: str  # "yes" or "no"
+    price: int  # cents
+    contracts: int = 10
+
+
+@app.post("/api/hr/order")
+async def hr_order(req: HROrderRequest):
+    """Post a limit order on a Kalshi HR market."""
+    import httpx
+    path = "/trade-api/v2/portfolio/orders"
+    auth = _kalshi_auth_headers("POST", path)
+    if not auth:
+        return {"error": "Kalshi auth not configured", "ok": False}
+    auth["accept"] = "application/json"
+    auth["content-type"] = "application/json"
+
+    order_body = {
+        "action": "buy",
+        "side": req.side,
+        "ticker": req.ticker,
+        "type": "limit",
+        "count": req.contracts,
+        "yes_price": req.price if req.side == "yes" else (100 - req.price),
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.post(
+                f"{KALSHI_API_BASE}/portfolio/orders",
+                headers=auth,
+                json=order_body,
+            )
+            if r.status_code in (200, 201):
+                order = r.json().get("order", r.json())
+                return {"ok": True, "order": order}
+            else:
+                return {"ok": False, "error": r.text, "status": r.status_code}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/hr/cancel-game")
+async def hr_cancel_game(game_key: str):
+    """Cancel all open HR orders for a specific game (e.g. 'BALKC')."""
+    import httpx
+    path = "/trade-api/v2/portfolio/orders"
+    auth = _kalshi_auth_headers("GET", path)
+    if not auth:
+        return {"error": "Kalshi auth not configured", "ok": False}
+    auth["accept"] = "application/json"
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            # Get open orders
+            r = await client.get(
+                f"{KALSHI_API_BASE}/portfolio/orders",
+                headers=auth,
+                params={"status": "resting"},
+            )
+            if r.status_code != 200:
+                return {"ok": False, "error": f"Failed to fetch orders: {r.text}"}
+
+            orders = r.json().get("orders", [])
+            game_orders = [o for o in orders if game_key.upper() in o.get("ticker", "").upper() and "KXMLBHR" in o.get("ticker", "")]
+
+            cancelled = 0
+            for order in game_orders:
+                order_id = order.get("order_id")
+                if not order_id:
+                    continue
+                cancel_path = f"/trade-api/v2/portfolio/orders/{order_id}"
+                cancel_auth = _kalshi_auth_headers("DELETE", cancel_path)
+                cancel_auth["accept"] = "application/json"
+                cr = await client.delete(
+                    f"{KALSHI_API_BASE}/portfolio/orders/{order_id}",
+                    headers=cancel_auth,
+                )
+                if cr.status_code in (200, 204):
+                    cancelled += 1
+
+            return {"ok": True, "cancelled": cancelled, "total_found": len(game_orders)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+# ---------------------------------------------------------------------------
 # NFL Draft Markets (Kalshi)
 # ---------------------------------------------------------------------------
 
