@@ -1615,16 +1615,17 @@ async def hr_scan(req: HRScanRequest):
         volume = int(float(m.get("volume_fp", 0) or 0))
         ticker = m["ticker"]
 
-        # Edge calculations
-        # YES edge: buy YES if ask < fv_cents * (1 - margin)
+        # Edge calculations — margin applied to YES fair value
+        # YES: buy if ask ≤ fv * (1 - margin)  (discount to fair)
         yes_cutoff = round(fv_cents * (1 - margin))
-        yes_edge = round((fv_cents - yes_ask) / yes_ask * 100, 1) if yes_ask > 0 else 0
+        yes_edge = round((fv_cents - yes_ask) / fv_cents * 100, 1) if fv_cents > 0 and yes_ask > 0 else 0
         yes_actionable = yes_ask <= yes_cutoff and yes_ask > 0
 
-        # NO edge: buy NO if no_ask < fv_no_cents * (1 - margin)
-        # equivalently: yes_bid >= fv_cents * (1 + margin / (1 - margin))
-        no_cutoff = round(fv_no_cents * (1 - margin))
-        no_edge = round((fv_no_cents - no_ask) / no_ask * 100, 1) if no_ask > 0 else 0
+        # NO: buy if YES is inflated beyond fv * (1 + margin)
+        # i.e. no_ask ≤ 100 - fv * (1 + margin)
+        yes_inflated = round(fv_cents * (1 + margin))
+        no_cutoff = 100 - yes_inflated
+        no_edge = round((fv_no_cents - no_ask) / fv_no_cents * 100, 1) if fv_no_cents > 0 and no_ask > 0 else 0
         no_actionable = no_ask <= no_cutoff and no_ask > 0
 
         results.append({
