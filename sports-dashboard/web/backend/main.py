@@ -1540,17 +1540,36 @@ def _american_to_cents(american: int) -> int:
     return max(1, min(99, round(prob * 100)))
 
 
+def _normalize_name(name: str) -> str:
+    """Strip accents, punctuation, suffixes for matching."""
+    import unicodedata
+    # Remove accents: é->e, ñ->n, etc.
+    nfkd = unicodedata.normalize("NFKD", name)
+    ascii_name = "".join(c for c in nfkd if not unicodedata.combining(c))
+    return (ascii_name.lower().strip()
+            .replace(".", "")
+            .replace("'", "")
+            .replace("-", " ")
+            .replace(" jr", "")
+            .replace(" sr", "")
+            .replace(" ii", "")
+            .replace(" iii", "")
+            .strip())
+
+
 def _fuzzy_match_name(target: str, candidates: list) -> Optional[str]:
     """Match a player name loosely (handles Jr., accents, etc.)."""
-    target_lower = target.lower().strip().replace(".", "").replace("jr", "").strip()
-    target_parts = set(target_lower.split())
+    target_norm = _normalize_name(target)
+    target_parts = set(target_norm.split())
     best_match = None
     best_score = 0
     for name in candidates:
-        name_lower = name.lower().strip().replace(".", "").replace("jr", "").strip()
-        name_parts = set(name_lower.split())
-        # Last name match is most important
+        name_norm = _normalize_name(name)
+        name_parts = set(name_norm.split())
         overlap = len(target_parts & name_parts)
+        # Bonus for exact full match
+        if target_norm == name_norm:
+            overlap = 100
         if overlap > best_score:
             best_score = overlap
             best_match = name
