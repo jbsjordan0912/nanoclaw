@@ -1560,19 +1560,31 @@ def _normalize_name(name: str) -> str:
 def _fuzzy_match_name(target: str, candidates: list) -> Optional[str]:
     """Match a player name loosely (handles Jr., accents, etc.)."""
     target_norm = _normalize_name(target)
-    target_parts = set(target_norm.split())
+    target_parts = target_norm.split()
     best_match = None
     best_score = 0
     for name in candidates:
         name_norm = _normalize_name(name)
-        name_parts = set(name_norm.split())
-        overlap = len(target_parts & name_parts)
-        # Bonus for exact full match
+        name_parts = name_norm.split()
+        # Exact match
         if target_norm == name_norm:
-            overlap = 100
+            return name
+        # Score: require last name match, bonus for first name
+        target_last = target_parts[-1] if target_parts else ""
+        name_last = name_parts[-1] if name_parts else ""
+        if target_last != name_last:
+            continue
+        # Last name matches — score by total word overlap
+        overlap = len(set(target_parts) & set(name_parts))
         if overlap > best_score:
             best_score = overlap
             best_match = name
+    # Fallback: if no last-name match, try substring
+    if not best_match:
+        for name in candidates:
+            name_norm = _normalize_name(name)
+            if target_norm in name_norm or name_norm in target_norm:
+                return name
     return best_match if best_score >= 1 else None
 
 
