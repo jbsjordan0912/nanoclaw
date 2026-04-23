@@ -2075,7 +2075,7 @@ async def nfl_draft(category: str = "top"):
             last = _parse_price(m, "last_price")
             if team not in teams:
                 teams[team] = []
-            teams[team].append({"pos": pos, "bid": bid, "ask": ask, "last": last})
+            teams[team].append({"pos": pos, "bid": bid, "ask": ask, "last": last, "ticker": ticker})
         for t in teams:
             teams[t] = sorted(teams[t], key=lambda x: -x["bid"])
         return dict(sorted(teams.items()))
@@ -2101,7 +2101,7 @@ async def nfl_draft(category: str = "top"):
                 players[player_code] = {"name": name, "teams": []}
             elif name and not players[player_code]["name"]:
                 players[player_code]["name"] = name
-            players[player_code]["teams"].append({"team": team, "bid": bid})
+            players[player_code]["teams"].append({"team": team, "bid": bid, "ticker": ticker})
 
         # Sort players by max bid desc, teams within player by bid desc
         result = {}

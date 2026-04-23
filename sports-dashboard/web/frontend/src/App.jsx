@@ -3181,7 +3181,7 @@ function NFLDraftTab() {
                 options={NFL_TEAMS.filter(t => teamPosData[t]).map(t => ({ value: t, label: t }))}
                 onChange={setTeamPosTeam} />
               {teamPosTeam && teamPosData[teamPosTeam] && teamPosData[teamPosTeam].map((p, i) => (
-                <DraftRow key={p.pos} i={i} name={p.pos} bid={p.bid} ask={p.ask} last={p.last} />
+                <DraftRow key={p.ticker || p.pos} i={i} name={p.pos} bid={p.bid} ask={p.ask} last={p.last} ticker={p.ticker} />
               ))}
               {!teamPosTeam && <div style={{ textAlign: 'center', color: '#475569', padding: 30, fontSize: 13 }}>Select a team above</div>}
             </div>
@@ -3211,17 +3211,9 @@ function NFLDraftTab() {
                   <div style={{ fontSize: 14, fontWeight: 800, color: '#3b82f6', marginBottom: 4, padding: '4px 0', borderBottom: '1px solid #1e293b' }}>
                     {player}
                   </div>
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-                    {teams.map(t => (
-                      <div key={t.team} style={{
-                        padding: '6px 10px', background: '#1e293b', borderRadius: 6,
-                        fontSize: 12, color: t.bid > 10 ? '#22c55e' : '#94a3b8',
-                        fontWeight: t.bid > 10 ? 700 : 400,
-                      }}>
-                        {t.team} <span style={{ fontVariantNumeric: 'tabular-nums' }}>{t.bid}¢</span>
-                      </div>
-                    ))}
-                  </div>
+                  {teams.map((t, i) => (
+                    <DraftRow key={t.ticker || t.team} i={i} name={t.team} bid={t.bid} ticker={t.ticker} />
+                  ))}
                 </div>
               ))}
               {!draftedBySearch && <div style={{ textAlign: 'center', color: '#475569', padding: 10, fontSize: 12 }}>Showing top 20 · search to filter</div>}
