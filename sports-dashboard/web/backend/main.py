@@ -1870,6 +1870,67 @@ async def nfl_draft_consensus(with_kalshi: bool = False):
     return {"sources": len(MOCK_DRAFTS), "source_names": list(MOCK_DRAFTS.keys()), "consensus": consensus}
 
 
+@app.get("/api/nfl/draft/overunder")
+async def nfl_draft_overunder():
+    """NFL Draft over/under pick markets from Kalshi with consensus comparison."""
+    import re
+    markets = await _fetch_kalshi_series("KXNFLDRAFTOU")
+    consensus = {p["name"]: p for p in _build_consensus()}
+
+    results = []
+    for m in markets:
+        ticker = m.get("ticker", "")
+        title = m.get("title", "")
+        # Parse: "Will X be drafted before pick 5.5 in 2026?"
+        match = re.search(r"Will (.+?) be drafted before pick ([\d.]+)", title)
+        if not match:
+            continue
+        name = match.group(1)
+        line = float(match.group(2))
+
+        ya = _parse_price(m, "yes_ask")
+        yb = _parse_price(m, "yes_bid")
+        na = _parse_price(m, "no_ask")
+        nb = _parse_price(m, "no_bid")
+        vol = int(float(m.get("volume_fp", 0) or 0))
+
+        # Find consensus avg pick
+        matched = _fuzzy_match_name(name, list(consensus.keys()))
+        cons = consensus.get(matched, {}) if matched else {}
+        avg_pick = cons.get("avg_pick")
+        mock_pct = cons.get("pct")
+
+        # Calculate consensus implied: what % of mocks have this player going before the line
+        over_pct = None
+        if matched and matched in consensus:
+            picks = []
+            for mock_picks in MOCK_DRAFTS.values():
+                for pick, player in mock_picks.items():
+                    if _normalize_name(player) == _normalize_name(matched):
+                        picks.append(pick)
+            if picks:
+                over_pct = round(sum(1 for p in picks if p < line) / len(picks) * 100)
+
+        results.append({
+            "ticker": ticker,
+            "name": name,
+            "line": line,
+            "yes_bid": yb,
+            "yes_ask": ya,
+            "no_bid": nb,
+            "no_ask": na,
+            "volume": vol,
+            "avg_pick": avg_pick,
+            "mock_pct": mock_pct,
+            "over_pct": over_pct,
+            "yes_edge": (over_pct - ya) if over_pct is not None and ya > 0 else None,
+            "no_edge": ((100 - over_pct) - na) if over_pct is not None and na > 0 else None,
+        })
+
+    results.sort(key=lambda x: -(abs(x["yes_edge"] or 0) if (x["yes_edge"] or 0) > 0 else abs(x["no_edge"] or 0)))
+    return results
+
+
 # ---------------------------------------------------------------------------
 # NFL Draft Markets (Kalshi)
 # ---------------------------------------------------------------------------

@@ -2843,8 +2843,28 @@ function NFLDraftTab() {
     }
   }, [category])
 
+  // O/U state
+  const [ouData, setOuData] = useState(null)
+  const [ouLoading, setOuLoading] = useState(false)
+
+  // Load O/U when category selected, auto-refresh every 30s
+  useEffect(() => {
+    if (category !== 'overunder') return
+    const loadOU = () => {
+      setOuLoading(!ouData)
+      fetch(`${API}/api/nfl/draft/overunder`)
+        .then(r => r.json())
+        .then(data => { setOuData(data); setOuLoading(false) })
+        .catch(e => { setError(e.message); setOuLoading(false) })
+    }
+    loadOU()
+    const interval = setInterval(loadOU, 30000)
+    return () => clearInterval(interval)
+  }, [category])
+
   const categories = [
     { id: 'draft', label: 'Draft Board' },
+    { id: 'overunder', label: 'O/U' },
     { id: 'positional', label: 'By Position' },
     { id: 'team_pos', label: 'Team Pos' },
     { id: 'drafted_by', label: 'Drafted By' },
@@ -2969,6 +2989,61 @@ function NFLDraftTab() {
             </div>
           )}
         </div>
+      )}
+
+      {/* ── Over/Under ── */}
+      {category === 'overunder' && (
+        ouLoading && !ouData
+          ? <div style={{ textAlign: 'center', color: '#475569', padding: 40 }}>Loading O/U markets...</div>
+          : ouData && (
+            <div>
+              <div style={{ fontSize: 10, color: '#475569', textAlign: 'right', marginBottom: 8 }}>Auto-refreshes every 30s</div>
+              {ouData.map((m, i) => {
+                const hasEdge = (m.yes_edge != null && m.yes_edge > 10) || (m.no_edge != null && m.no_edge > 10)
+                const bestEdge = Math.max(m.yes_edge || 0, m.no_edge || 0)
+                return (
+                  <div key={m.ticker} style={{
+                    padding: '10px 12px', background: i % 2 === 0 ? '#1e293b' : '#0f172a',
+                    borderRadius: 6, marginBottom: 2,
+                    borderLeft: hasEdge ? `3px solid ${(m.yes_edge || 0) > 10 ? '#22c55e' : '#ef4444'}` : '3px solid transparent',
+                  }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                      <div style={{ fontSize: 14, fontWeight: 700, color: '#e2e8f0' }}>{m.name}</div>
+                      <div style={{ fontSize: 12, color: '#f59e0b', fontWeight: 700 }}>Pick {m.line}</div>
+                    </div>
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 12 }}>
+                      {/* Over (YES) */}
+                      <div style={{ flex: 1, background: '#0f172a33', borderRadius: 4, padding: '6px 8px' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                          <span style={{ fontWeight: 700, color: '#22c55e' }}>OVER</span>
+                          <span style={{ color: '#94a3b8', fontVariantNumeric: 'tabular-nums' }}>{m.yes_bid}/{m.yes_ask}¢</span>
+                          {m.yes_edge != null && m.yes_edge > 5 && (
+                            <span style={{ fontWeight: 700, color: m.yes_edge > 10 ? '#22c55e' : '#84cc16', fontVariantNumeric: 'tabular-nums' }}>+{m.yes_edge}</span>
+                          )}
+                        </div>
+                      </div>
+                      {/* Under (NO) */}
+                      <div style={{ flex: 1, background: '#0f172a33', borderRadius: 4, padding: '6px 8px' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                          <span style={{ fontWeight: 700, color: '#ef4444' }}>UNDER</span>
+                          <span style={{ color: '#94a3b8', fontVariantNumeric: 'tabular-nums' }}>{m.no_bid}/{m.no_ask}¢</span>
+                          {m.no_edge != null && m.no_edge > 5 && (
+                            <span style={{ fontWeight: 700, color: m.no_edge > 10 ? '#22c55e' : '#84cc16', fontVariantNumeric: 'tabular-nums' }}>+{m.no_edge}</span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                    {/* Consensus line */}
+                    {m.avg_pick != null && (
+                      <div style={{ fontSize: 11, color: '#64748b', marginTop: 4, fontVariantNumeric: 'tabular-nums' }}>
+                        Consensus avg pick: {m.avg_pick} · {m.over_pct != null ? `${m.over_pct}% mocked over` : ''} · vol: {m.volume?.toLocaleString()}
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          )
       )}
 
       {/* ── Team Position ── */}
