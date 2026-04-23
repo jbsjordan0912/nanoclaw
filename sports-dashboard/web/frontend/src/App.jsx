@@ -2679,46 +2679,156 @@ function MockConsensusTab() {
   )
 }
 
-// ── NFL Draft Market Row ──────────────────────────────────────────────────────
-function DraftRow({ name, subtitle, bid, ask, last, volume, i }) {
+// ── NFL Draft Market Row (expandable with orderbook + trade) ─────────────────
+function DraftRow({ name, subtitle, bid, ask, last, volume, i, ticker }) {
+  const [expanded, setExpanded] = useState(false)
+  const [ob, setOb] = useState(null)
+  const [obLoading, setObLoading] = useState(false)
+  const [qty, setQty] = useState(10)
+  const [orderStatus, setOrderStatus] = useState(null)
+
+  const loadOb = () => {
+    if (!ticker) return
+    setObLoading(true)
+    fetch(`${API}/api/kalshi/orderbook/${ticker}`)
+      .then(r => r.json())
+      .then(d => { setOb(d); setObLoading(false) })
+      .catch(() => setObLoading(false))
+  }
+
+  const toggle = () => {
+    if (!expanded && ticker) loadOb()
+    setExpanded(!expanded)
+  }
+
+  const placeOrder = async (side, price) => {
+    setOrderStatus({ status: 'posting', side })
+    try {
+      const r = await fetch(`${API}/api/hr/order`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ticker, side, price, contracts: qty }),
+      })
+      const d = await r.json()
+      setOrderStatus(d.ok
+        ? { status: 'posted', msg: `${qty}x ${side.toUpperCase()} @ ${price}¢` }
+        : { status: 'error', msg: d.error || 'Failed' })
+    } catch (e) { setOrderStatus({ status: 'error', msg: e.message }) }
+  }
+
+  const maxSize = ob ? Math.max(
+    ...((ob.bids || []).map(l => l.size)),
+    ...((ob.asks || []).map(l => l.size)),
+    1
+  ) : 1
+
   return (
     <div style={{
-      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-      padding: '10px 12px', background: i % 2 === 0 ? '#1e293b' : '#0f172a',
-      borderRadius: 6, marginBottom: 2,
+      background: i % 2 === 0 ? '#1e293b' : '#0f172a',
+      borderRadius: 6, marginBottom: 2, overflow: 'hidden',
     }}>
-      <div style={{ flex: 1 }}>
-        <div style={{ fontSize: 14, fontWeight: 600, color: '#e2e8f0' }}>{name}</div>
-        {subtitle && <div style={{ fontSize: 11, color: '#64748b' }}>{subtitle}</div>}
-      </div>
-      <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
-        {ask != null && (
-          <div style={{ textAlign: 'right' }}>
-            <div style={{ fontSize: 11, color: '#64748b' }}>Bid/Ask</div>
-            <div style={{ fontSize: 13, fontWeight: 700, color: '#22c55e', fontVariantNumeric: 'tabular-nums' }}>
-              {bid}¢ / {ask}¢
+      {/* Summary row — tap to expand */}
+      <div onClick={toggle} style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        padding: '10px 12px', cursor: ticker ? 'pointer' : 'default',
+      }}>
+        <div style={{ flex: 1 }}>
+          <div style={{ fontSize: 14, fontWeight: 600, color: '#e2e8f0' }}>{name}</div>
+          {subtitle && <div style={{ fontSize: 11, color: '#64748b' }}>{subtitle}</div>}
+        </div>
+        <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+          {ask != null && (
+            <div style={{ textAlign: 'right' }}>
+              <div style={{ fontSize: 11, color: '#64748b' }}>Bid/Ask</div>
+              <div style={{ fontSize: 13, fontWeight: 700, color: '#22c55e', fontVariantNumeric: 'tabular-nums' }}>
+                {bid}¢ / {ask}¢
+              </div>
             </div>
-          </div>
-        )}
-        {ask == null && (
-          <div style={{ textAlign: 'right' }}>
-            <div style={{ fontSize: 11, color: '#64748b' }}>Bid</div>
-            <div style={{ fontSize: 13, fontWeight: 700, color: '#22c55e', fontVariantNumeric: 'tabular-nums' }}>{bid}¢</div>
-          </div>
-        )}
-        {last != null && (
-          <div style={{ textAlign: 'right', minWidth: 40 }}>
-            <div style={{ fontSize: 11, color: '#64748b' }}>Last</div>
-            <div style={{ fontSize: 13, fontWeight: 700, color: '#f1f5f9', fontVariantNumeric: 'tabular-nums' }}>{last}¢</div>
-          </div>
-        )}
-        {volume != null && (
-          <div style={{ textAlign: 'right', minWidth: 45 }}>
-            <div style={{ fontSize: 11, color: '#64748b' }}>Vol</div>
-            <div style={{ fontSize: 12, color: '#94a3b8', fontVariantNumeric: 'tabular-nums' }}>{volume?.toLocaleString()}</div>
-          </div>
-        )}
+          )}
+          {ask == null && bid != null && (
+            <div style={{ textAlign: 'right' }}>
+              <div style={{ fontSize: 11, color: '#64748b' }}>Bid</div>
+              <div style={{ fontSize: 13, fontWeight: 700, color: '#22c55e', fontVariantNumeric: 'tabular-nums' }}>{bid}¢</div>
+            </div>
+          )}
+          {last != null && (
+            <div style={{ textAlign: 'right', minWidth: 40 }}>
+              <div style={{ fontSize: 11, color: '#64748b' }}>Last</div>
+              <div style={{ fontSize: 13, fontWeight: 700, color: '#f1f5f9', fontVariantNumeric: 'tabular-nums' }}>{last}¢</div>
+            </div>
+          )}
+          {volume != null && (
+            <div style={{ textAlign: 'right', minWidth: 45 }}>
+              <div style={{ fontSize: 11, color: '#64748b' }}>Vol</div>
+              <div style={{ fontSize: 12, color: '#94a3b8', fontVariantNumeric: 'tabular-nums' }}>{volume?.toLocaleString()}</div>
+            </div>
+          )}
+          {ticker && <span style={{ fontSize: 10, color: '#334155' }}>{expanded ? '▼' : '▶'}</span>}
+        </div>
       </div>
+
+      {/* Expanded: orderbook + trade */}
+      {expanded && ticker && (
+        <div style={{ padding: '0 12px 12px' }}>
+          {obLoading && <div style={{ fontSize: 11, color: '#475569', padding: 8 }}>Loading book...</div>}
+          {ob && (
+            <div>
+              {/* Orderbook: bids left, asks right */}
+              <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+                {/* Bids */}
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 10, color: '#3b82f6', fontWeight: 700, marginBottom: 4 }}>YES BID</div>
+                  {(ob.bids || []).slice(0, 5).map((l, j) => (
+                    <div key={j} style={{ position: 'relative', marginBottom: 1 }}>
+                      <div style={{ position: 'absolute', right: 0, top: 0, bottom: 0, width: `${(l.size/maxSize)*100}%`, background: '#3b82f610', borderRadius: 3 }} />
+                      <div style={{ position: 'relative', display: 'flex', justifyContent: 'space-between', padding: '2px 6px', fontSize: 12, color: j === 0 ? '#3b82f6' : '#64748b', fontWeight: j === 0 ? 700 : 400, fontVariantNumeric: 'tabular-nums' }}>
+                        <span>{l.price}¢</span><span style={{ color: '#475569' }}>{l.size}</span>
+                      </div>
+                    </div>
+                  ))}
+                  {(!ob.bids || ob.bids.length === 0) && <div style={{ fontSize: 11, color: '#334155', padding: 4 }}>empty</div>}
+                </div>
+                {/* Asks */}
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 10, color: '#ef4444', fontWeight: 700, marginBottom: 4 }}>YES ASK</div>
+                  {(ob.asks || []).slice(0, 5).map((l, j) => (
+                    <div key={j} style={{ position: 'relative', marginBottom: 1 }}>
+                      <div style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: `${(l.size/maxSize)*100}%`, background: '#ef444410', borderRadius: 3 }} />
+                      <div style={{ position: 'relative', display: 'flex', justifyContent: 'space-between', padding: '2px 6px', fontSize: 12, color: j === 0 ? '#ef4444' : '#64748b', fontWeight: j === 0 ? 700 : 400, fontVariantNumeric: 'tabular-nums' }}>
+                        <span>{l.price}¢</span><span style={{ color: '#475569' }}>{l.size}</span>
+                      </div>
+                    </div>
+                  ))}
+                  {(!ob.asks || ob.asks.length === 0) && <div style={{ fontSize: 11, color: '#334155', padding: 4 }}>empty</div>}
+                </div>
+              </div>
+
+              {/* Quick trade */}
+              <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                <input type="number" value={qty} onChange={e => setQty(Number(e.target.value))} min={1}
+                  style={{ width: 50, padding: '5px 6px', borderRadius: 6, background: '#0f172a', border: '1px solid #334155', color: '#f1f5f9', fontSize: 12, textAlign: 'center', outline: 'none' }} />
+                <button onClick={() => ob.asks?.[0] && placeOrder('yes', ob.asks[0].price)} style={{
+                  flex: 1, padding: '6px 0', borderRadius: 6, border: 'none', fontSize: 11, fontWeight: 700,
+                  background: '#22c55e', color: '#000', cursor: 'pointer',
+                }}>BUY YES {ob.asks?.[0]?.price || '?'}¢</button>
+                <button onClick={() => ob.bids?.[0] && placeOrder('no', 100 - ob.bids[0].price)} style={{
+                  flex: 1, padding: '6px 0', borderRadius: 6, border: 'none', fontSize: 11, fontWeight: 700,
+                  background: '#ef4444', color: '#fff', cursor: 'pointer',
+                }}>BUY NO {ob.bids?.[0] ? (100 - ob.bids[0].price) : '?'}¢</button>
+                <button onClick={loadOb} style={{
+                  padding: '6px 8px', borderRadius: 6, border: 'none', fontSize: 11,
+                  background: '#334155', color: '#94a3b8', cursor: 'pointer',
+                }}>↻</button>
+              </div>
+              {orderStatus && (
+                <div style={{ fontSize: 11, marginTop: 6, color: orderStatus.status === 'posted' ? '#22c55e' : orderStatus.status === 'error' ? '#ef4444' : '#f59e0b' }}>
+                  {orderStatus.status === 'posting' ? 'Placing...' : orderStatus.msg}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   )
 }
@@ -2935,7 +3045,7 @@ function NFLDraftTab() {
               {draftTier && !pickNum && draftData[draftTier] && draftData[draftTier]
                 .filter(m => m.yes_bid > 0 || m.volume > 0)
                 .map((m, i) => (
-                  <DraftRow key={m.ticker} i={i} name={m.name} bid={m.yes_bid} ask={m.yes_ask} last={m.last_price} volume={m.volume} />
+                  <DraftRow key={m.ticker} i={i} name={m.name} bid={m.yes_bid} ask={m.yes_ask} last={m.last_price} volume={m.volume} ticker={m.ticker} />
                 ))
               }
 
@@ -2944,7 +3054,7 @@ function NFLDraftTab() {
               {pickNum && pickData && pickData[pickNum] && pickData[pickNum]
                 .filter(m => m.yes_bid > 0 || m.volume > 0)
                 .map((m, i) => (
-                  <DraftRow key={m.ticker} i={i} name={m.name} bid={m.yes_bid} ask={m.yes_ask} last={m.last_price} volume={m.volume} />
+                  <DraftRow key={m.ticker} i={i} name={m.name} bid={m.yes_bid} ask={m.yes_ask} last={m.last_price} volume={m.volume} ticker={m.ticker} />
                 ))
               }
             </div>
@@ -2983,7 +3093,7 @@ function NFLDraftTab() {
               {posOrdinal && posData[posOrdinal] && posData[posOrdinal]
                 .filter(m => m.yes_bid > 0 || m.volume > 0)
                 .map((m, i) => (
-                  <DraftRow key={m.ticker} i={i} name={m.name} bid={m.yes_bid} ask={m.yes_ask} last={m.last_price} volume={m.volume} />
+                  <DraftRow key={m.ticker} i={i} name={m.name} bid={m.yes_bid} ask={m.yes_ask} last={m.last_price} volume={m.volume} ticker={m.ticker} />
                 ))
               }
             </div>
