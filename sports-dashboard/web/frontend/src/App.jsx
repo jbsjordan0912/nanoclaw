@@ -2685,6 +2685,7 @@ function DraftRow({ name, subtitle, bid, ask, last, volume, i, ticker }) {
   const [ob, setOb] = useState(null)
   const [obLoading, setObLoading] = useState(false)
   const [qty, setQty] = useState(10)
+  const [limitPrice, setLimitPrice] = useState('')
   const [orderStatus, setOrderStatus] = useState(null)
 
   const loadOb = () => {
@@ -2803,8 +2804,8 @@ function DraftRow({ name, subtitle, bid, ask, last, volume, i, ticker }) {
                 </div>
               </div>
 
-              {/* Quick trade */}
-              <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+              {/* Market buy */}
+              <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginBottom: 6 }}>
                 <input type="number" value={qty} onChange={e => setQty(Number(e.target.value))} min={1}
                   style={{ width: 50, padding: '5px 6px', borderRadius: 6, background: '#0f172a', border: '1px solid #334155', color: '#f1f5f9', fontSize: 12, textAlign: 'center', outline: 'none' }} />
                 <button onClick={() => ob.asks?.[0] && placeOrder('yes', ob.asks[0].price)} style={{
@@ -2819,6 +2820,20 @@ function DraftRow({ name, subtitle, bid, ask, last, volume, i, ticker }) {
                   padding: '6px 8px', borderRadius: 6, border: 'none', fontSize: 11,
                   background: '#334155', color: '#94a3b8', cursor: 'pointer',
                 }}>↻</button>
+              </div>
+              {/* Limit order */}
+              <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                <input type="number" value={limitPrice} onChange={e => setLimitPrice(Number(e.target.value))} min={1} max={99}
+                  placeholder="¢"
+                  style={{ width: 50, padding: '5px 6px', borderRadius: 6, background: '#0f172a', border: '1px solid #334155', color: '#f1f5f9', fontSize: 12, textAlign: 'center', outline: 'none' }} />
+                <button onClick={() => limitPrice > 0 && placeOrder('yes', limitPrice)} style={{
+                  flex: 1, padding: '6px 0', borderRadius: 6, border: 'none', fontSize: 11, fontWeight: 600,
+                  background: '#1e3a2f', color: '#22c55e', cursor: 'pointer', border: '1px solid #22c55e33',
+                }}>LIMIT YES {limitPrice || '?'}¢</button>
+                <button onClick={() => limitPrice > 0 && placeOrder('no', limitPrice)} style={{
+                  flex: 1, padding: '6px 0', borderRadius: 6, border: 'none', fontSize: 11, fontWeight: 600,
+                  background: '#3a1e1e', color: '#ef4444', cursor: 'pointer', border: '1px solid #ef444433',
+                }}>LIMIT NO {limitPrice || '?'}¢</button>
               </div>
               {orderStatus && (
                 <div style={{ fontSize: 11, marginTop: 6, color: orderStatus.status === 'posted' ? '#22c55e' : orderStatus.status === 'error' ? '#ef4444' : '#f59e0b' }}>
