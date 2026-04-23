@@ -1763,6 +1763,102 @@ async def hr_cancel_game(game_key: str):
 
 
 # ---------------------------------------------------------------------------
+# NFL Mock Draft Consensus
+# ---------------------------------------------------------------------------
+
+MOCK_DRAFTS = {
+    "Jeremiah": {1:"Fernando Mendoza",2:"David Bailey",3:"Arvell Reese",4:"Sonny Styles",5:"Jeremiyah Love",6:"Spencer Fano",7:"Jordyn Tyson",8:"Francis Mauigoa",9:"Mansoor Delane",10:"Carnell Tate",11:"Rueben Bain Jr.",12:"Caleb Downs",13:"Makai Lemon",14:"Kenyon Sadiq",15:"Kadyn Proctor",16:"Omar Cooper Jr.",17:"Monroe Freeling",18:"Colton Hood",19:"Dillon Thieneman",20:"Malachi Lawrence",21:"Blake Miller",22:"Olaivavega Ioane",23:"Akheem Mesidor",24:"KC Concepcion",25:"Keldric Faulk",26:"Ty Simpson",27:"Denzel Boston",28:"Max Iheanachor",29:"Treydan Stukes",30:"Caleb Lomu",31:"Chris Johnson",32:"Peter Woods"},
+    "Reuter": {1:"Fernando Mendoza",2:"Arvell Reese",3:"David Bailey",4:"Jeremiyah Love",5:"Francis Mauigoa",6:"Monroe Freeling",7:"Mansoor Delane",8:"Rueben Bain Jr.",9:"Kadyn Proctor",10:"Caleb Downs",11:"Carnell Tate",12:"Sonny Styles",13:"Spencer Fano",14:"Caleb Banks",15:"Akheem Mesidor",16:"Ty Simpson",17:"Makai Lemon",18:"Colton Hood",19:"Kenyon Sadiq",20:"Jordyn Tyson",21:"Olaivavega Ioane",22:"Jermod McCoy",23:"Omar Cooper Jr.",24:"Chris Johnson",25:"Keldric Faulk",26:"KC Concepcion",27:"Caleb Lomu",28:"Blake Miller",29:"Kayden McDonald",30:"Dillon Thieneman",31:"Eli Stowers",32:"R Mason Thomas"},
+    "Breer": {1:"Fernando Mendoza",2:"David Bailey",3:"Jeremiyah Love",4:"Arvell Reese",5:"Carnell Tate",6:"Spencer Fano",7:"Sonny Styles",8:"Mansoor Delane",9:"Jordyn Tyson",10:"Caleb Downs",11:"Rueben Bain Jr.",12:"Dillon Thieneman",13:"Makai Lemon",14:"Francis Mauigoa",15:"Akheem Mesidor",16:"Omar Cooper Jr.",17:"Kadyn Proctor",18:"Kenyon Sadiq",19:"Monroe Freeling",20:"Keldric Faulk",21:"Olaivavega Ioane",22:"Caleb Banks",23:"Caleb Lomu",24:"KC Concepcion",25:"Zion Young",26:"Cashius Howell",27:"Malachi Lawrence",28:"Max Iheanachor",29:"Colton Hood",30:"Denzel Boston",31:"Blake Miller",32:"Chris Johnson"},
+    "SportsTalk": {1:"Fernando Mendoza",2:"Arvell Reese",3:"Jeremiyah Love",4:"David Bailey",5:"Jordyn Tyson",6:"Francis Mauigoa",7:"Sonny Styles",8:"Rueben Bain Jr.",9:"Spencer Fano",10:"Kadyn Proctor",11:"Mansoor Delane",12:"Caleb Downs",13:"Monroe Freeling",14:"Carnell Tate",15:"Olaivavega Ioane",16:"Kenyon Sadiq",17:"Makai Lemon",18:"Peter Woods",19:"Dillon Thieneman",20:"T.J. Parker",21:"KC Concepcion",22:"Akheem Mesidor",23:"Blake Miller",24:"Omar Cooper Jr.",25:"Keldric Faulk",26:"Ty Simpson",27:"Denzel Boston",28:"Kayden McDonald",29:"Chris Johnson",30:"Colton Hood",31:"Max Iheanachor",32:"Cashius Howell"},
+    "MockDraftDB": {1:"Fernando Mendoza",2:"Arvell Reese",3:"David Bailey",4:"Jeremiyah Love",5:"Sonny Styles",6:"Francis Mauigoa",7:"Caleb Downs",8:"Carnell Tate",9:"Rueben Bain Jr.",10:"Jordyn Tyson",11:"Kenyon Sadiq",12:"Mansoor Delane",13:"Spencer Fano",14:"Olaivavega Ioane",15:"Jermod McCoy",16:"Makai Lemon",17:"Monroe Freeling",18:"Dillon Thieneman",19:"Omar Cooper Jr.",20:"CJ Allen",21:"Caleb Lomu",22:"Peter Woods",23:"Keldric Faulk",24:"Denzel Boston",25:"Emmanuel McNeil-Warren",26:"Akheem Mesidor",27:"Max Iheanachor",28:"Kayden McDonald",29:"Avieon Terrell",30:"KC Concepcion",31:"Kadyn Proctor",32:"Chris Johnson"},
+    "YahooFinal": {1:"Fernando Mendoza",2:"David Bailey",3:"Arvell Reese",4:"Sonny Styles",5:"Caleb Downs",6:"Carnell Tate",7:"Jeremiyah Love",8:"Rueben Bain Jr.",9:"Francis Mauigoa",10:"Keldric Faulk",11:"Mansoor Delane",12:"Jermod McCoy",13:"Denzel Boston",14:"Spencer Fano",15:"Monroe Freeling",16:"Jordyn Tyson",17:"Max Iheanachor",18:"Kayden McDonald",19:"Dillon Thieneman",20:"Akheem Mesidor",21:"Olaivavega Ioane",22:"Peter Woods",23:"Kenyon Sadiq",24:"Kadyn Proctor",25:"Caleb Lomu",26:"CJ Allen",27:"Blake Miller",28:"Chase Bisontis",29:"KC Concepcion",30:"Makai Lemon",31:"TJ Parker",32:"Avieon Terrell"},
+    "Takeaways": {1:"Fernando Mendoza",2:"David Bailey",3:"Arvell Reese",4:"Jeremiyah Love",5:"Sonny Styles",6:"Spencer Fano",7:"Carnell Tate",8:"Mansoor Delane",9:"Rueben Bain Jr.",10:"Jordyn Tyson",11:"Francis Mauigoa",12:"Caleb Downs",13:"Makai Lemon",14:"Olaivavega Ioane",15:"Kadyn Proctor",16:"Omar Cooper Jr.",17:"Monroe Freeling",18:"Dillon Thieneman",19:"Kenyon Sadiq",20:"Keldric Faulk",21:"Caleb Lomu",22:"Peter Woods",23:"Akheem Mesidor",24:"Denzel Boston",25:"Blake Miller",26:"Emmanuel McNeil-Warren",27:"KC Concepcion",28:"Max Iheanachor",29:"Jermod McCoy",30:"Colton Hood",31:"Malachi Lawrence",32:"Ty Simpson"},
+    "Draftwire": {1:"Fernando Mendoza",2:"David Bailey",3:"Jeremiyah Love",4:"Arvell Reese",5:"Sonny Styles",6:"Carnell Tate",7:"Caleb Downs",8:"Rueben Bain Jr.",9:"Spencer Fano",10:"Makai Lemon",11:"Francis Mauigoa",12:"Mansoor Delane",13:"Kenyon Sadiq",14:"Olaivavega Ioane",15:"Keldric Faulk",16:"Jordyn Tyson",17:"Monroe Freeling",18:"Dillon Thieneman",19:"Kadyn Proctor",20:"Akheem Mesidor",21:"Omar Cooper Jr.",22:"Peter Woods",23:"Blake Miller",24:"Max Iheanachor",25:"TJ Parker",26:"Kayden McDonald",27:"Caleb Lomu",28:"Emmanuel Pregnon",29:"Jermod McCoy",30:"Colton Hood",31:"Zion Young",32:"KC Concepcion"},
+    "Mock10": {1:"Fernando Mendoza",2:"Arvell Reese",3:"Jeremiyah Love",4:"David Bailey",5:"Caleb Downs",6:"Spencer Fano",7:"Sonny Styles",8:"Carnell Tate",9:"Mansoor Delane",10:"Jordyn Tyson",11:"Francis Mauigoa",12:"Rueben Bain Jr.",13:"Kenyon Sadiq",14:"Olaivavega Ioane",15:"Monroe Freeling",16:"Makai Lemon",17:"Kadyn Proctor",18:"Dillon Thieneman",19:"Omar Cooper Jr.",20:"Jermod McCoy",21:"Malachi Lawrence",22:"TJ Parker",23:"Max Iheanachor",24:"Denzel Boston",25:"Peter Woods",26:"Keldric Faulk",27:"KC Concepcion",28:"Kayden McDonald",29:"Blake Miller",30:"Chris Johnson",31:"Akheem Mesidor",32:"Colton Hood"},
+    "USAToday": {1:"Fernando Mendoza",2:"David Bailey",3:"Jeremiyah Love",4:"Arvell Reese",5:"Jordyn Tyson",6:"Kadyn Proctor",7:"Sonny Styles",8:"Carnell Tate",9:"Rueben Bain Jr.",10:"Caleb Downs",11:"Spencer Fano",12:"Mansoor Delane",13:"Kenyon Sadiq",14:"Olaivavega Ioane",15:"Akheem Mesidor",16:"Omar Cooper Jr.",17:"Keldric Faulk",18:"Kayden McDonald",19:"Francis Mauigoa",20:"Dillon Thieneman",21:"Makai Lemon",22:"Peter Woods",23:"Monroe Freeling",24:"Denzel Boston",25:"Emmanuel McNeil-Warren",26:"CJ Allen",27:"Max Iheanachor",28:"Blake Miller",29:"Colton Hood",30:"Jermod McCoy",31:"Caleb Lomu",32:"Chris Johnson"},
+    "SBNation": {1:"Fernando Mendoza",2:"David Bailey",3:"Jeremiyah Love",4:"Sonny Styles",5:"Caleb Downs",6:"Arvell Reese",7:"Rueben Bain Jr.",8:"Carnell Tate",9:"Mansoor Delane",10:"Francis Mauigoa",11:"Jordyn Tyson",12:"Spencer Fano",13:"Makai Lemon",14:"Olaivavega Ioane",15:"Akheem Mesidor",16:"Omar Cooper Jr.",17:"Monroe Freeling",18:"Dillon Thieneman",19:"KC Concepcion",20:"Denzel Boston",21:"Kadyn Proctor",22:"Chase Bisontis",23:"Blake Miller",24:"Ty Simpson",25:"Kayden McDonald",26:"Keldric Faulk",27:"Jermod McCoy",28:"Caleb Lomu",29:"Kenyon Sadiq",30:"Chris Johnson",31:"Zion Young",32:"Colton Hood"},
+    "CBS_Prisco": {1:"Fernando Mendoza",2:"David Bailey",3:"Jeremiyah Love",4:"Arvell Reese",5:"Sonny Styles",6:"Kadyn Proctor",7:"Jordyn Tyson",8:"Carnell Tate",9:"Rueben Bain Jr.",10:"Caleb Downs",11:"Spencer Fano",12:"Mansoor Delane",13:"Makai Lemon",14:"Olaivavega Ioane",15:"Akheem Mesidor",16:"Omar Cooper Jr.",17:"Francis Mauigoa",18:"Peter Woods",19:"Kenyon Sadiq",20:"Malachi Lawrence",21:"Dillon Thieneman",22:"TJ Parker",23:"Keldric Faulk",24:"Denzel Boston",25:"Monroe Freeling",26:"R Mason Thomas",27:"Caleb Lomu",28:"Keylan Rutledge",29:"Treydan Stukes",30:"Colton Hood",31:"Max Iheanachor",32:"Jadarian Price"},
+    "FantasyLife": {1:"Fernando Mendoza",2:"David Bailey",3:"Jeremiyah Love",4:"Arvell Reese",5:"Sonny Styles",6:"Spencer Fano",7:"Carnell Tate",8:"Jordyn Tyson",9:"Francis Mauigoa",10:"Caleb Downs",11:"Mansoor Delane",12:"Rueben Bain Jr.",13:"Makai Lemon",14:"Olaivavega Ioane",15:"Keldric Faulk",16:"Omar Cooper Jr.",17:"Kadyn Proctor",18:"Dillon Thieneman",19:"Kenyon Sadiq",20:"Jermod McCoy",21:"Monroe Freeling",22:"Peter Woods",23:"Blake Miller",24:"KC Concepcion",25:"Akheem Mesidor",26:"Kayden McDonald",27:"Caleb Lomu",28:"Max Iheanachor",29:"Colton Hood",30:"Denzel Boston",31:"TJ Parker",32:"Chris Johnson"},
+    "TheAthletic": {1:"Fernando Mendoza",2:"David Bailey",3:"Jeremiyah Love",4:"Arvell Reese",5:"Jordyn Tyson",6:"Spencer Fano",7:"Carnell Tate",8:"Sonny Styles",9:"Mansoor Delane",10:"Caleb Downs",11:"Rueben Bain Jr.",12:"Dillon Thieneman",13:"Francis Mauigoa",14:"Olaivavega Ioane",15:"Akheem Mesidor",16:"Makai Lemon",17:"Kadyn Proctor",18:"Colton Hood",19:"Kenyon Sadiq",20:"Malachi Lawrence",21:"Monroe Freeling",22:"Keldric Faulk",23:"Omar Cooper Jr.",24:"KC Concepcion",25:"TJ Parker",26:"Emmanuel McNeil-Warren",27:"Denzel Boston",28:"Blake Miller",29:"Caleb Lomu",30:"Jermod McCoy",31:"Max Iheanachor",32:"Chris Johnson"},
+    "NFLcom_Final": {1:"Fernando Mendoza",2:"David Bailey",3:"Arvell Reese",4:"Jeremiyah Love",5:"Sonny Styles",6:"Francis Mauigoa",7:"Carnell Tate",8:"Jordyn Tyson",9:"Rueben Bain Jr.",10:"Caleb Downs",11:"Mansoor Delane",12:"Dillon Thieneman",13:"Makai Lemon",14:"Olaivavega Ioane",15:"Akheem Mesidor",16:"Omar Cooper Jr.",17:"Spencer Fano",18:"Jermod McCoy",19:"Kenyon Sadiq",20:"Keldric Faulk",21:"Monroe Freeling",22:"Kayden McDonald",23:"Kadyn Proctor",24:"KC Concepcion",25:"Caleb Lomu",26:"Emmanuel McNeil-Warren",27:"Blake Miller",28:"Max Iheanachor",29:"Colton Hood",30:"Denzel Boston",31:"TJ Parker",32:"Chris Johnson"},
+    "Zierlein": {1:"Fernando Mendoza",2:"Arvell Reese",3:"Jeremiyah Love",4:"David Bailey",5:"Jordyn Tyson",6:"Spencer Fano",7:"Sonny Styles",8:"Carnell Tate",9:"Mansoor Delane",10:"Caleb Downs",11:"Francis Mauigoa",12:"Rueben Bain Jr.",13:"Kenyon Sadiq",14:"Olaivavega Ioane",15:"Kadyn Proctor",16:"Monroe Freeling",17:"Blake Miller",18:"Dillon Thieneman",19:"Makai Lemon",20:"Colton Hood",21:"Malachi Lawrence",22:"Akheem Mesidor",23:"Omar Cooper Jr.",24:"Denzel Boston",25:"TJ Parker",26:"Jacob Rodriguez",27:"KC Concepcion",28:"Caleb Lomu",29:"Ty Simpson",30:"Keldric Faulk",31:"Max Iheanachor",32:"Chris Johnson"},
+    "Brooks": {1:"Fernando Mendoza",2:"David Bailey",3:"Arvell Reese",4:"Sonny Styles",5:"Jeremiyah Love",6:"Carnell Tate",7:"Caleb Downs",8:"Rueben Bain Jr.",9:"Francis Mauigoa",10:"Jordyn Tyson",11:"Mansoor Delane",12:"Dillon Thieneman",13:"Monroe Freeling",14:"Spencer Fano",15:"Olaivavega Ioane",16:"Jermod McCoy",17:"Kadyn Proctor",18:"Peter Woods",19:"Kenyon Sadiq",20:"Colton Hood",21:"Emmanuel McNeil-Warren",22:"TJ Parker",24:"Caleb Lomu",25:"Akheem Mesidor",26:"Keldric Faulk",27:"Denzel Boston",28:"Chase Bisontis",29:"Avieon Terrell",30:"Emmanuel Pregnon",32:"Jadarian Price"},
+    "247Sports": {1:"Fernando Mendoza",2:"David Bailey",3:"Arvell Reese",4:"Jeremiyah Love",5:"Caleb Downs",6:"Francis Mauigoa",7:"Sonny Styles",8:"Carnell Tate",9:"Mansoor Delane",10:"Jordyn Tyson",11:"Rueben Bain Jr.",12:"Jermod McCoy",13:"Spencer Fano",14:"Olaivavega Ioane",15:"Kenyon Sadiq",16:"Makai Lemon",17:"Kadyn Proctor",18:"Dillon Thieneman",19:"Monroe Freeling",20:"Akheem Mesidor",21:"Blake Miller",22:"Colton Hood",23:"CJ Allen",24:"Omar Cooper Jr.",25:"Emmanuel McNeil-Warren",26:"KC Concepcion",27:"Caleb Lomu",28:"Max Iheanachor",29:"Keldric Faulk",30:"Kayden McDonald",31:"Ty Simpson",32:"Treydan Stukes"},
+    "ESPN_Yates": {1:"Fernando Mendoza",2:"David Bailey",3:"Jeremiyah Love",4:"Sonny Styles",5:"Arvell Reese",6:"Monroe Freeling",7:"Carnell Tate",8:"Jordyn Tyson",9:"Caleb Downs",10:"Olaivavega Ioane",11:"Francis Mauigoa",12:"Mansoor Delane",13:"Spencer Fano",14:"Rueben Bain Jr.",15:"Kenyon Sadiq",16:"Makai Lemon",17:"Kadyn Proctor",18:"Dillon Thieneman",19:"Kayden McDonald",20:"Keldric Faulk",21:"Max Iheanachor",22:"Akheem Mesidor",23:"Blake Miller",24:"Denzel Boston",25:"R Mason Thomas",26:"Malachi Lawrence",27:"Omar Cooper Jr.",28:"Peter Woods",29:"Colton Hood",30:"Ty Simpson",31:"Caleb Lomu",32:"TJ Parker"},
+    "Kiper": {1:"Fernando Mendoza",2:"David Bailey",3:"Jeremiyah Love",4:"Sonny Styles",5:"Arvell Reese",6:"Spencer Fano",7:"Carnell Tate",8:"Caleb Downs",9:"Mansoor Delane",10:"Jordyn Tyson",11:"Francis Mauigoa",12:"Rueben Bain Jr.",13:"Kadyn Proctor",14:"Olaivavega Ioane",15:"Akheem Mesidor",16:"Makai Lemon",17:"Kenyon Sadiq",18:"Dillon Thieneman",19:"Blake Miller",20:"Omar Cooper Jr.",21:"Monroe Freeling",22:"Keldric Faulk",23:"Max Iheanachor",24:"Denzel Boston",25:"TJ Parker",26:"Peter Woods",27:"Caleb Lomu",28:"KC Concepcion",29:"Malachi Lawrence",30:"Jermod McCoy",31:"Zion Young",32:"Ty Simpson"},
+}
+
+
+def _build_consensus():
+    """Build consensus from all mock drafts."""
+    from collections import Counter, defaultdict
+    r1_count = Counter()
+    avg_pick = defaultdict(list)
+    total = len(MOCK_DRAFTS)
+    for picks in MOCK_DRAFTS.values():
+        for pick, player in picks.items():
+            r1_count[player] += 1
+            avg_pick[player].append(pick)
+
+    results = []
+    for player, count in r1_count.most_common(50):
+        if count > total:
+            continue
+        picks = avg_pick[player]
+        results.append({
+            "name": player,
+            "count": count,
+            "total": total,
+            "pct": round(count / total * 100),
+            "avg_pick": round(sum(picks) / len(picks), 1),
+            "min_pick": min(picks),
+            "max_pick": max(picks),
+        })
+    return results
+
+
+@app.get("/api/nfl/draft/consensus")
+async def nfl_draft_consensus(with_kalshi: bool = False):
+    """Get mock draft consensus, optionally with live Kalshi prices."""
+    consensus = _build_consensus()
+
+    if not with_kalshi:
+        return {"sources": len(MOCK_DRAFTS), "consensus": consensus}
+
+    # Fetch Kalshi R1 markets
+    markets = await _fetch_kalshi_series("KXNFLDRAFTTOP")
+    r1_markets = {}
+    for m in markets:
+        if "-R1-" not in m.get("ticker", ""):
+            continue
+        name = m.get("yes_sub_title", "").strip()
+        if name:
+            r1_markets[_normalize_name(name)] = m
+
+    for player in consensus:
+        norm = _normalize_name(player["name"])
+        kalshi_m = None
+        for kn, m in r1_markets.items():
+            if norm == kn or (len(norm.split()) > 1 and norm.split()[-1] in kn):
+                kalshi_m = m
+                break
+
+        if kalshi_m:
+            ya = _parse_price(kalshi_m, "yes_ask")
+            na = _parse_price(kalshi_m, "no_ask")
+            yb = _parse_price(kalshi_m, "yes_bid")
+            player["yes_ask"] = ya
+            player["no_ask"] = na
+            player["yes_bid"] = yb
+            player["ticker"] = kalshi_m["ticker"]
+            player["yes_edge"] = player["pct"] - ya
+            player["no_edge"] = (100 - player["pct"]) - na
+
+    return {"sources": len(MOCK_DRAFTS), "source_names": list(MOCK_DRAFTS.keys()), "consensus": consensus}
+
+
+# ---------------------------------------------------------------------------
 # NFL Draft Markets (Kalshi)
 # ---------------------------------------------------------------------------
 

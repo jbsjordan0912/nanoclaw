@@ -2551,6 +2551,134 @@ function HRScannerTab() {
   )
 }
 
+// ── Mock Consensus Tab ───────────────────────────────────────────────────────
+function MockConsensusTab() {
+  const [data, setData] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [showKalshi, setShowKalshi] = useState(false)
+  const [filter, setFilter] = useState('all') // all, edges, yes, no
+
+  const load = (withKalshi) => {
+    setLoading(true)
+    fetch(`${API}/api/nfl/draft/consensus?with_kalshi=${withKalshi}`)
+      .then(r => r.json())
+      .then(d => { setData(d); setLoading(false); setShowKalshi(withKalshi) })
+      .catch(() => setLoading(false))
+  }
+
+  useEffect(() => { load(false) }, [])
+
+  const edgeColor = (v) => {
+    if (v > 15) return '#22c55e'
+    if (v > 5) return '#84cc16'
+    if (v > 0) return '#94a3b8'
+    if (v > -10) return '#f59e0b'
+    return '#ef4444'
+  }
+
+  const filtered = data?.consensus?.filter(p => {
+    if (filter === 'all') return true
+    if (filter === 'edges') return Math.abs(p.yes_edge || 0) > 10 || Math.abs(p.no_edge || 0) > 10
+    if (filter === 'yes') return (p.yes_edge || 0) > 10
+    if (filter === 'no') return (p.no_edge || 0) > 10
+    return true
+  }) || []
+
+  return (
+    <div>
+      {/* Header */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+        <div>
+          <div style={{ fontSize: 16, fontWeight: 800, color: '#e2e8f0' }}>Mock Draft Consensus</div>
+          <div style={{ fontSize: 12, color: '#64748b' }}>{data?.sources || 0} sources{data?.source_names ? ` · ${data.source_names.slice(0,5).join(', ')}...` : ''}</div>
+        </div>
+        {!showKalshi && (
+          <button onClick={() => load(true)} style={{
+            padding: '6px 14px', borderRadius: 8, border: 'none', fontSize: 12, fontWeight: 600,
+            background: '#7c3aed', color: '#fff', cursor: 'pointer',
+          }}>+ Kalshi</button>
+        )}
+      </div>
+
+      {/* Filters (only when Kalshi loaded) */}
+      {showKalshi && (
+        <div style={{ display: 'flex', gap: 6, marginBottom: 12 }}>
+          {[
+            { id: 'all', label: 'All' },
+            { id: 'edges', label: 'Edges' },
+            { id: 'yes', label: 'Buy YES' },
+            { id: 'no', label: 'Buy NO' },
+          ].map(f => (
+            <button key={f.id} onClick={() => setFilter(f.id)} style={{
+              padding: '5px 12px', borderRadius: 14, border: 'none', fontSize: 11, fontWeight: 600,
+              background: filter === f.id ? '#7c3aed' : '#1e293b',
+              color: filter === f.id ? '#fff' : '#94a3b8',
+              cursor: 'pointer',
+            }}>{f.label}</button>
+          ))}
+        </div>
+      )}
+
+      {loading && <div style={{ textAlign: 'center', color: '#475569', padding: 40 }}>Loading...</div>}
+
+      {/* Consensus table */}
+      {!loading && filtered.map((p, i) => (
+        <div key={p.name} style={{
+          display: 'flex', alignItems: 'center', padding: '8px 10px',
+          background: i % 2 === 0 ? '#1e293b' : '#0f172a', borderRadius: 6, marginBottom: 2,
+          borderLeft: showKalshi && (Math.abs(p.yes_edge || 0) > 10 || Math.abs(p.no_edge || 0) > 10)
+            ? `3px solid ${(p.yes_edge || 0) > 10 ? '#22c55e' : '#ef4444'}` : '3px solid transparent',
+        }}>
+          {/* Rank / Name */}
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ fontSize: 13, fontWeight: 700, color: '#e2e8f0' }}>{p.name}</span>
+            </div>
+            <div style={{ fontSize: 11, color: '#64748b', fontVariantNumeric: 'tabular-nums' }}>
+              {p.count}/{p.total} mocks · avg {p.avg_pick} · {p.min_pick}-{p.max_pick}
+            </div>
+          </div>
+
+          {/* Consensus % */}
+          <div style={{ textAlign: 'center', minWidth: 50 }}>
+            <div style={{ fontSize: 11, color: '#64748b' }}>R1%</div>
+            <div style={{
+              fontSize: 15, fontWeight: 800, fontVariantNumeric: 'tabular-nums',
+              color: p.pct === 100 ? '#22c55e' : p.pct >= 80 ? '#84cc16' : p.pct >= 50 ? '#f59e0b' : '#ef4444',
+            }}>{p.pct}%</div>
+          </div>
+
+          {/* Kalshi columns */}
+          {showKalshi && p.yes_ask != null && (
+            <>
+              <div style={{ textAlign: 'center', minWidth: 42 }}>
+                <div style={{ fontSize: 10, color: '#64748b' }}>YES</div>
+                <div style={{ fontSize: 12, fontWeight: 600, color: '#94a3b8', fontVariantNumeric: 'tabular-nums' }}>{p.yes_ask}¢</div>
+              </div>
+              <div style={{ textAlign: 'center', minWidth: 42 }}>
+                <div style={{ fontSize: 10, color: '#64748b' }}>NO</div>
+                <div style={{ fontSize: 12, fontWeight: 600, color: '#94a3b8', fontVariantNumeric: 'tabular-nums' }}>{p.no_ask}¢</div>
+              </div>
+              <div style={{ textAlign: 'center', minWidth: 46 }}>
+                <div style={{ fontSize: 10, color: '#64748b' }}>Edge</div>
+                <div style={{
+                  fontSize: 12, fontWeight: 700, fontVariantNumeric: 'tabular-nums',
+                  color: edgeColor(Math.max(p.yes_edge || 0, p.no_edge || 0)),
+                }}>
+                  {(p.yes_edge || 0) > (p.no_edge || 0)
+                    ? `Y+${p.yes_edge}`
+                    : (p.no_edge || 0) > 0 ? `N+${p.no_edge}` : `${p.yes_edge}`
+                  }
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+      ))}
+    </div>
+  )
+}
+
 // ── NFL Draft Market Row ──────────────────────────────────────────────────────
 function DraftRow({ name, subtitle, bid, ask, last, volume, i }) {
   return (
@@ -2919,6 +3047,7 @@ export default function App() {
 
   const nflTabs = [
     { id: 'draft', label: '📋 Draft' },
+    { id: 'mocks', label: '📊 Mocks' },
   ]
 
   const activeTabs = sport === 'mlb' ? mlbTabs : nflTabs
@@ -2972,7 +3101,8 @@ export default function App() {
       {sport === 'mlb' && (
         tab === 'research' ? <ResearchTab /> : tab === 'sim' ? <AtBatTab /> : tab === 'plakata' ? <PlakataTab /> : tab === 'hr' ? <HRScannerTab /> : <SpringOddsTab />
       )}
-      {sport === 'nfl' && <NFLDraftTab />}
+      {sport === 'nfl' && tab === 'draft' && <NFLDraftTab />}
+      {sport === 'nfl' && tab === 'mocks' && <MockConsensusTab />}
 
       <style>{`
         * { box-sizing: border-box; }
