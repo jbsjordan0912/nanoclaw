@@ -2911,20 +2911,14 @@ function NFLDraftTab() {
     }
   }, [pickNum])
 
-  // Load Draft Board when tab selected
+  // Load By Pick when tab selected
   useEffect(() => {
-    if (category === 'draft' && !draftData && !draftLoading) {
-      setDraftLoading(true)
-      fetch(`${API}/api/nfl/draft?category=top`)
+    if (category === 'draft' && !pickData && !pickLoading) {
+      setPickLoading(true)
+      fetch(`${API}/api/nfl/draft?category=by_pick`)
         .then(r => r.json())
-        .then(data => {
-          setDraftData(data)
-          const tiers = Object.keys(data)
-          setDraftTiers(tiers)
-          setDraftTier(tiers[0] || '')
-          setDraftLoading(false)
-        })
-        .catch(e => { setError(e.message); setDraftLoading(false) })
+        .then(data => { setPickData(data); setPickLoading(false); if (!pickNum) setPickNum(Object.keys(data)[0] || '') })
+        .catch(e => { setError(e.message); setPickLoading(false) })
     }
   }, [category])
 
@@ -2988,14 +2982,13 @@ function NFLDraftTab() {
   }, [category])
 
   const categories = [
-    { id: 'draft', label: 'Draft Board' },
+    { id: 'draft', label: 'By Pick' },
+    { id: 'positional', label: 'Pos Order' },
     { id: 'overunder', label: 'O/U' },
-    { id: 'positional', label: 'By Position' },
-    { id: 'team_pos', label: 'Team Pos' },
     { id: 'drafted_by', label: 'Drafted By' },
   ]
 
-  const POSITIONS = ['QB', 'WR', 'RB', 'TE', 'OL', 'EDGE', 'LB', 'DB']
+  const POSITIONS = ['QB', 'RB', 'TE', 'LB']  // Active for round 2
 
   const NFL_TEAMS = [
     'ARI','ATL','BAL','BUF','CAR','CHI','CIN','CLE','DAL','DEN','DET','GB',
@@ -3026,52 +3019,22 @@ function NFLDraftTab() {
 
       {error && <div style={{ textAlign: 'center', color: '#ef4444', padding: 20 }}>Error: {error}</div>}
 
-      {/* ── Draft Board (Round 1 + Top N + By Pick) ── */}
+      {/* ── By Pick ── */}
       {category === 'draft' && (
-        draftLoading
+        pickLoading && !pickData
           ? <div style={{ textAlign: 'center', color: '#475569', padding: 40 }}>Loading...</div>
-          : draftData && (
+          : pickData && (
             <div>
-              {/* Tier buttons */}
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 14 }}>
-                {draftTiers.map(t => (
-                  <button key={t} onClick={() => { setDraftTier(t); setPickNum('') }} style={{
-                    padding: '6px 14px', borderRadius: 16, border: 'none', fontSize: 12, fontWeight: 600,
-                    background: draftTier === t && !pickNum ? '#7c3aed' : '#1e293b',
-                    color: draftTier === t && !pickNum ? '#fff' : '#94a3b8',
-                    cursor: 'pointer', transition: 'all 0.15s',
-                  }}>{t}</button>
-                ))}
-                {/* By Pick dropdown */}
-                <select value={pickNum} onChange={e => { setPickNum(e.target.value); if (e.target.value) setDraftTier('') }} style={{
-                  padding: '6px 12px', borderRadius: 16, border: 'none', fontSize: 12, fontWeight: 600,
-                  background: pickNum ? '#7c3aed' : '#1e293b',
-                  color: pickNum ? '#fff' : '#94a3b8',
-                  cursor: 'pointer', outline: 'none',
-                }}>
-                  <option value="">By Pick #</option>
-                  {[1,2,3,4,5,6,7,8,9,10].map(n => (
-                    <option key={n} value={`Pick #${n}`}>Pick #{n}</option>
-                  ))}
-                </select>
-              </div>
-
-              {/* Show tier data */}
-              {draftTier && !pickNum && draftData[draftTier] && draftData[draftTier]
+              <DraftSelect label="Pick #" value={pickNum}
+                options={Object.keys(pickData).map(k => ({ value: k, label: k }))}
+                onChange={setPickNum} />
+              {pickNum && pickData[pickNum] && pickData[pickNum]
                 .filter(m => m.yes_bid > 0 || m.volume > 0)
                 .map((m, i) => (
                   <DraftRow key={m.ticker} i={i} name={m.name} bid={m.yes_bid} ask={m.yes_ask} last={m.last_price} volume={m.volume} ticker={m.ticker} />
                 ))
               }
-
-              {/* Show pick data */}
-              {pickNum && pickLoading && <div style={{ textAlign: 'center', color: '#475569', padding: 40 }}>Loading...</div>}
-              {pickNum && pickData && pickData[pickNum] && pickData[pickNum]
-                .filter(m => m.yes_bid > 0 || m.volume > 0)
-                .map((m, i) => (
-                  <DraftRow key={m.ticker} i={i} name={m.name} bid={m.yes_bid} ask={m.yes_ask} last={m.last_price} volume={m.volume} ticker={m.ticker} />
-                ))
-              }
+              {!pickNum && <div style={{ textAlign: 'center', color: '#475569', padding: 30, fontSize: 13 }}>Select a pick above</div>}
             </div>
           )
       )}
@@ -3130,23 +3093,6 @@ function NFLDraftTab() {
                   bid={m.yes_bid} ask={m.yes_ask} last={null}
                   volume={m.volume} ticker={m.ticker} />
               ))}
-            </div>
-          )
-      )}
-
-      {/* ── Team Position ── */}
-      {category === 'team_pos' && (
-        teamPosLoading
-          ? <div style={{ textAlign: 'center', color: '#475569', padding: 40 }}>Loading...</div>
-          : teamPosData && (
-            <div>
-              <DraftSelect label="Team" value={teamPosTeam}
-                options={NFL_TEAMS.filter(t => teamPosData[t]).map(t => ({ value: t, label: t }))}
-                onChange={setTeamPosTeam} />
-              {teamPosTeam && teamPosData[teamPosTeam] && teamPosData[teamPosTeam].map((p, i) => (
-                <DraftRow key={p.ticker || p.pos} i={i} name={p.pos} bid={p.bid} ask={p.ask} last={p.last} ticker={p.ticker} />
-              ))}
-              {!teamPosTeam && <div style={{ textAlign: 'center', color: '#475569', padding: 30, fontSize: 13 }}>Select a team above</div>}
             </div>
           )
       )}

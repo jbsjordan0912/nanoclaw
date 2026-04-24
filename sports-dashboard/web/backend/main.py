@@ -2008,10 +2008,10 @@ async def nfl_draft(category: str = "top"):
         return {k: groups[k] for k in tier_order if k in groups}
 
     elif category == "by_pick":
-        # Individual pick markets: who goes #1 through #10
+        # Individual pick markets
         pick1 = await _fetch_kalshi_series("KXNFLDRAFT1")
         picks = await _fetch_kalshi_series("KXNFLDRAFTPICK")
-        all_markets = pick1 + picks
+        all_markets = [m for m in (pick1 + picks) if m.get("status") == "active"]
         groups = {}
         for m in all_markets:
             ticker = m.get("ticker", "")
@@ -2039,8 +2039,9 @@ async def nfl_draft(category: str = "top"):
             groups.setdefault(label, []).append(row)
         for k in groups:
             groups[k] = sorted(groups[k], key=lambda x: -x["yes_bid"])
-        # Return in order: Pick #1 through #10
-        ordered = {f"Pick #{i}": groups.get(f"Pick #{i}", []) for i in range(1, 11)}
+        # Return in pick order, only active markets
+        active_picks = sorted([int(k.replace("Pick #", "")) for k in groups.keys()])
+        ordered = {f"Pick #{i}": groups[f"Pick #{i}"] for i in active_picks}
         return {k: v for k, v in ordered.items() if v}
 
     elif category == "positional":
