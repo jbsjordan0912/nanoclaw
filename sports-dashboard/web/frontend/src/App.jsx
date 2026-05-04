@@ -1380,8 +1380,8 @@ function PlakataTab() {
   const pollRef = useRef(null)
 
   // Trading auth — persist in localStorage
-  const [tradeUnlocked, setTradeUnlocked] = useState(() => !!localStorage.getItem('plakata_token'))
-  const [tradeToken, setTradeToken] = useState(() => localStorage.getItem('plakata_token') || '')
+  const [tradeUnlocked, setTradeUnlocked] = useState(() => !!localStorage.getItem('pitchpulse_token'))
+  const [tradeToken, setTradeToken] = useState(() => localStorage.getItem('pitchpulse_token') || '')
   const [pinInput, setPinInput] = useState('')
   const [pinError, setPinError] = useState('')
   const [showPinModal, setShowPinModal] = useState(false)
@@ -1480,7 +1480,7 @@ function PlakataTab() {
       if (d.ok) {
         setTradeToken(d.token)
         setTradeUnlocked(true)
-        localStorage.setItem('plakata_token', d.token)
+        localStorage.setItem('pitchpulse_token', d.token)
         setShowPinModal(false)
         setPinInput('')
       } else {
@@ -1659,12 +1659,12 @@ function PlakataTab() {
 
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
         <div style={{ fontSize: 13, fontWeight: 700, color: '#94a3b8' }}>
-          PLAKATA
+          PITCHPULSE
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
           {tradeUnlocked
             ? <span style={{ fontSize: 10, color: '#f59e0b', fontWeight: 700, cursor: 'pointer' }}
-                onClick={() => { setTradeUnlocked(false); setTradeToken(''); localStorage.removeItem('plakata_token') }}>TRADING ●</span>
+                onClick={() => { setTradeUnlocked(false); setTradeToken(''); localStorage.removeItem('pitchpulse_token') }}>TRADING ●</span>
             : <span style={{ fontSize: 10, color: '#475569', fontWeight: 600, cursor: 'pointer' }}
                 onClick={() => setShowPinModal(true)}>VIEW ONLY</span>
           }
@@ -2570,7 +2570,7 @@ export default function App() {
         {[
           { id: 'research', label: '🔍 Research' },
           { id: 'sim',      label: '⚾ Sim' },
-          { id: 'plakata',  label: '💥 Plakata' },
+          { id: 'plakata',  label: '💥 PitchPulse' },
           { id: 'spring',   label: '🌸 Odds' },
           { id: 'hr',       label: '💣 HR' },
         ].map(t => (
