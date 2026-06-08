@@ -159,6 +159,35 @@ def simulate(req: SimRequest):
     }
 
 
+# ---------------------------------------------------------------------------
+# TE engine — 1,000-AB batch simulation (vendored: atbat_engine + models_te)
+# ---------------------------------------------------------------------------
+
+import sim_te
+
+@app.on_event("startup")
+def _warm_te():
+    try:
+        sim_te.warm()
+    except Exception as e:
+        print(f"[sim_te] warm failed (lazy-load on first request): {e}")
+
+class BatchSimRequest(BaseModel):
+    batter_id: int
+    pitcher_id: int
+    n: int = 1000
+
+@app.post("/api/simulate1k")
+def simulate1k(req: BatchSimRequest):
+    """Run n at-bats (TE engine) for a matchup. Returns one played-out AB plus
+    aggregates: avg AB length, 1st-pitch velo, pitch distribution, outcomes."""
+    n = max(1, min(req.n, 5000))
+    try:
+        return sim_te.simulate_session(req.batter_id, req.pitcher_id, n=n)
+    except Exception as e:
+        raise HTTPException(400, str(e))
+
+
 @app.get("/api/health")
 def health():
     try:

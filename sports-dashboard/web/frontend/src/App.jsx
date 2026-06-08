@@ -16,7 +16,7 @@ const wpBarColor = (wp) => {
 }
 
 // ── Player search ─────────────────────────────────────────────────────────────
-function PlayerSearch({ label, value, onSelect }) {
+function PlayerSearch({ label, value, onSelect, apiBase = API }) {
   const [query, setQuery] = useState(value?.name || '')
   const [results, setResults] = useState([])
   const [open, setOpen] = useState(false)
@@ -27,7 +27,7 @@ function PlayerSearch({ label, value, onSelect }) {
     clearTimeout(timer.current)
     if (q.length < 2) { setResults([]); setOpen(false); return }
     timer.current = setTimeout(async () => {
-      const res = await fetch(`${API}/api/players/search?q=${encodeURIComponent(q)}`)
+      const res = await fetch(`${apiBase}/api/players/search?q=${encodeURIComponent(q)}`)
       const data = await res.json()
       setResults(data)
       setOpen(true)
@@ -339,6 +339,142 @@ function AtBatTab() {
               </div>
             ))}
           </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── 1K Batch Simulator tab (TE engine) ───────────────────────────────────────
+const PITCH_BAR_COLORS = ['#3b82f6','#ef4444','#22c55e','#f59e0b','#a855f7','#06b6d4','#f97316','#84cc16','#ec4899','#14b8a6','#eab308']
+const OUTCOME_BAR_COLORS = {
+  'Single':'#22c55e','Double':'#16a34a','Triple':'#15803d','Home Run':'#f59e0b',
+  'Walk':'#3b82f6','Strikeout':'#ef4444','Out in Play':'#64748b',
+}
+
+function StatTile({ label, value, sub }) {
+  return (
+    <div style={{ flex: 1, background: '#1e293b', borderRadius: 10, padding: '12px 10px', textAlign: 'center' }}>
+      <div style={{ fontSize: 24, fontWeight: 800, color: '#f1f5f9', lineHeight: 1.1 }}>{value}</div>
+      <div style={{ fontSize: 10, color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.04em', marginTop: 4 }}>{label}</div>
+      {sub && <div style={{ fontSize: 11, color: '#475569', marginTop: 2 }}>{sub}</div>}
+    </div>
+  )
+}
+
+function DistBar({ label, pct, count, color }) {
+  return (
+    <div style={{ marginBottom: 7 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, marginBottom: 3 }}>
+        <span style={{ color: '#e2e8f0', fontWeight: 600 }}>{label}</span>
+        <span style={{ color: '#64748b', fontVariantNumeric: 'tabular-nums' }}>{(pct*100).toFixed(1)}% · {count}</span>
+      </div>
+      <div style={{ height: 8, borderRadius: 4, background: '#0f172a', overflow: 'hidden' }}>
+        <div style={{ height: '100%', width: `${Math.min(pct*100,100)}%`, background: color, borderRadius: 4, transition: 'width 0.4s ease' }} />
+      </div>
+    </div>
+  )
+}
+
+function BatchSimTab() {
+  const [batter, setBatter] = useState(null)
+  const [pitcher, setPitcher] = useState(null)
+  const [n, setN] = useState(1000)
+  const [loading, setLoading] = useState(false)
+  const [data, setData] = useState(null)
+  const [elapsed, setElapsed] = useState(null)
+  const [error, setError] = useState(null)
+  const canSim = batter && pitcher && !loading
+
+  const run = async () => {
+    if (!canSim) return
+    setLoading(true); setError(null); setData(null)
+    const t0 = performance.now()
+    try {
+      const res = await fetch(`${API}/api/simulate1k`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ batter_id: batter.id, pitcher_id: pitcher.id, n }),
+      })
+      if (!res.ok) throw new Error(`Server error ${res.status}`)
+      setData(await res.json())
+      setElapsed(((performance.now() - t0) / 1000).toFixed(1))
+    } catch (e) { setError(e.message) }
+    finally { setLoading(false) }
+  }
+
+  const ab = data?.example_ab
+
+  return (
+    <div>
+      <div style={{ display: 'flex', gap: 12, marginBottom: 12 }}>
+        <PlayerSearch label="Batter" value={batter} onSelect={setBatter} />
+        <PlayerSearch label="Pitcher" value={pitcher} onSelect={setPitcher} />
+      </div>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 16, alignItems: 'center' }}>
+        <span style={{ fontSize: 11, color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Sims</span>
+        {[100, 1000, 5000].map(v => (
+          <button key={v} onClick={() => setN(v)} style={{
+            padding: '5px 12px', borderRadius: 6, border: 'none', fontSize: 13, fontWeight: 700,
+            background: n === v ? '#2563eb' : '#1e293b', color: n === v ? '#fff' : '#64748b', cursor: 'pointer',
+          }}>{v.toLocaleString()}</button>
+        ))}
+      </div>
+      <button onClick={run} disabled={!canSim} style={{
+        width: '100%', padding: '14px 0', borderRadius: 10, border: 'none',
+        background: canSim ? '#2563eb' : '#1e293b', color: canSim ? '#fff' : '#475569',
+        fontSize: 16, fontWeight: 700, cursor: canSim ? 'pointer' : 'not-allowed', marginBottom: 20,
+      }}>{loading ? `⏳ Simulating ${n.toLocaleString()}...` : `▶ Run ${n.toLocaleString()} Simulations`}</button>
+      {error && <div style={{ color: '#ef4444', fontSize: 14, textAlign: 'center', marginBottom: 16 }}>{error}</div>}
+
+      {data && (
+        <div style={{ animation: 'fadeIn 0.3s ease' }}>
+          <div style={{ textAlign: 'center', fontSize: 13, color: '#94a3b8', marginBottom: 14 }}>
+            {data.matchup.batter_name} <span style={{ color: '#475569' }}>({data.matchup.stand})</span>
+            <span style={{ color: '#475569' }}> vs </span>
+            {data.matchup.pitcher_name} <span style={{ color: '#475569' }}>({data.matchup.p_throws}HP)</span>
+            {elapsed && <span style={{ color: '#475569' }}> · {data.n.toLocaleString()} ABs in {elapsed}s</span>}
+          </div>
+
+          {/* Headline stats */}
+          <div style={{ display: 'flex', gap: 8, marginBottom: 18 }}>
+            <StatTile label="Avg AB Length" value={data.avg_ab_length} sub="pitches" />
+            <StatTile label="1st-Pitch Velo" value={`${data.first_pitch_velo.mean}`} sub={`${data.first_pitch_velo.min}–${data.first_pitch_velo.max} mph`} />
+            <StatTile label="wOBA" value={data.woba} sub="expected" />
+          </div>
+
+          {/* Outcomes over N ABs */}
+          <div style={{ marginBottom: 18 }}>
+            <div style={{ fontSize: 11, color: '#475569', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 10 }}>
+              Outcomes · {data.n.toLocaleString()} ABs
+            </div>
+            {data.outcomes.map(o => (
+              <DistBar key={o.key} label={o.label} pct={o.pct} count={o.count} color={OUTCOME_BAR_COLORS[o.label] || '#64748b'} />
+            ))}
+          </div>
+
+          {/* Pitch mix */}
+          <div style={{ marginBottom: 18 }}>
+            <div style={{ fontSize: 11, color: '#475569', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 10 }}>
+              Pitch Distribution
+            </div>
+            {data.pitch_distribution.filter(d => d.pct >= 0.005).map((d, i) => (
+              <DistBar key={d.pitch_type} label={d.pitch_type} pct={d.pct} count={d.count} color={PITCH_BAR_COLORS[i % PITCH_BAR_COLORS.length]} />
+            ))}
+          </div>
+
+          {/* One example AB played out */}
+          {ab && (
+            <div>
+              <div style={{ fontSize: 11, color: '#475569', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 10 }}>
+                Example At-Bat
+              </div>
+              <div style={{ marginBottom: 12 }}><StrikeZone pitches={ab.pitches} shownCount={ab.pitches.length} /></div>
+              <ResultBanner result={{ ...ab, matchup: `${data.matchup.batter_name} vs ${data.matchup.pitcher_name}` }} />
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 12 }}>
+                {ab.pitches.map((p, i) => <PitchCard key={i} pitch={p} delay={0} />)}
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -2570,6 +2706,7 @@ export default function App() {
         {[
           { id: 'research', label: '🔍 Research' },
           { id: 'sim',      label: '⚾ Sim' },
+          { id: 'batch',    label: '📊 1K' },
           { id: 'plakata',  label: '💥 PitchPulse' },
           { id: 'spring',   label: '🌸 Odds' },
           { id: 'hr',       label: '💣 HR' },
@@ -2583,7 +2720,7 @@ export default function App() {
         ))}
       </div>
 
-      {tab === 'research' ? <ResearchTab /> : tab === 'sim' ? <AtBatTab /> : tab === 'plakata' ? <PlakataTab /> : tab === 'hr' ? <HRScannerTab /> : <SpringOddsTab />}
+      {tab === 'research' ? <ResearchTab /> : tab === 'sim' ? <AtBatTab /> : tab === 'batch' ? <BatchSimTab /> : tab === 'plakata' ? <PlakataTab /> : tab === 'hr' ? <HRScannerTab /> : <SpringOddsTab />}
 
       <style>{`
         * { box-sizing: border-box; }

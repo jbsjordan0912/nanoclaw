@@ -5,3 +5,8 @@ supabase
 httpx
 websockets
 cryptography
+lightgbm
+numpy
+pandas
+pyarrow
+scikit-learn
