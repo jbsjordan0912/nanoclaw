@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
 from dotenv import load_dotenv
-import asyncio, base64, time, json, hashlib
+import asyncio, base64, time, json, hashlib, hmac, uuid
 from datetime import datetime, timezone, timedelta
 
 # Load backend .env first (Kalshi keys), then data-pipeline .env (Supabase etc.)
@@ -1110,24 +1110,38 @@ TRADE_PASSWORD = os.environ.get("PLAKATA_PASSWORD", "")
 class TradeAuthRequest(BaseModel):
     password: str
 
+TRADE_TOKEN_TTL = timedelta(days=7)
+
+def _mint_trade_token() -> str:
+    """Token = '<expiry_epoch>.<hmac>', valid until expiry. Survives UTC rollover."""
+    exp = int((datetime.now(timezone.utc) + TRADE_TOKEN_TTL).timestamp())
+    sig = hmac.new(TRADE_PASSWORD.encode(), str(exp).encode(), hashlib.sha256).hexdigest()[:32]
+    return f"{exp}.{sig}"
+
+
 @app.post("/api/auth/trade")
 async def auth_trade(body: TradeAuthRequest):
     """Verify trading password. Returns token if correct."""
     if not TRADE_PASSWORD:
         return {"ok": False, "error": "Trading not configured"}
     if body.password == TRADE_PASSWORD:
-        # Simple token — hash of password + date so it changes daily
-        token = hashlib.sha256(f"{TRADE_PASSWORD}:{datetime.now(timezone.utc).strftime('%Y-%m-%d')}".encode()).hexdigest()[:32]
-        return {"ok": True, "token": token}
+        return {"ok": True, "token": _mint_trade_token()}
     return {"ok": False, "error": "Wrong password"}
 
 
 def _verify_trade_token(token: str) -> bool:
-    """Verify a trading token."""
-    if not TRADE_PASSWORD or not token:
+    """Verify a trading token: signature valid AND not expired."""
+    if not TRADE_PASSWORD or not token or "." not in token:
         return False
-    expected = hashlib.sha256(f"{TRADE_PASSWORD}:{datetime.now(timezone.utc).strftime('%Y-%m-%d')}".encode()).hexdigest()[:32]
-    return token == expected
+    try:
+        exp_str, sig = token.split(".", 1)
+        exp = int(exp_str)
+    except (ValueError, AttributeError):
+        return False
+    if exp < int(datetime.now(timezone.utc).timestamp()):
+        return False  # expired
+    expected = hmac.new(TRADE_PASSWORD.encode(), exp_str.encode(), hashlib.sha256).hexdigest()[:32]
+    return hmac.compare_digest(sig, expected)
 
 
 # ---------------------------------------------------------------------------
@@ -1273,6 +1287,7 @@ async def trade_execute(req: SweepExecuteRequest):
                     "type": "limit",
                     "count": fill["contracts"],
                     "yes_price": fill["price"] if req.side == "yes" else (100 - fill["price"]),
+                    "client_order_id": str(uuid.uuid4()),  # required by Kalshi; also idempotency key
                 }
 
                 r = await client.post(

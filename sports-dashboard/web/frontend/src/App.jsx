@@ -1590,7 +1590,15 @@ function PlakataTab() {
                 trade_token: tradeToken,
               }),
             })
-            setTradeResult(await r.json())
+            const result = await r.json()
+            setTradeResult(result)
+            // Token expired/invalid — drop it and force a re-unlock
+            if (r.status === 401 || result?.error === 'Unauthorized') {
+              localStorage.removeItem('pitchpulse_token')
+              setTradeUnlocked(false)
+              setTradeToken('')
+              setShowPinModal(true)
+            }
           } catch (e) { setTradeResult({ error: e.message, ok: false }) }
           finally { setTradeLoading(false) }
         }
@@ -1968,6 +1976,11 @@ function PlakataTab() {
                 {tradeResult.ok ? `Filled ${tradeResult.summary?.total_contracts} contracts` : 'Failed'}
               </div>
               {tradeResult.error && <div style={{ fontSize: 11, color: '#ef4444' }}>{tradeResult.error}</div>}
+              {!tradeResult.ok && tradeResult.orders?.find(o => o.error) && (
+                <div style={{ fontSize: 11, color: '#ef4444', wordBreak: 'break-word' }}>
+                  {tradeResult.orders.find(o => o.error).error}
+                </div>
+              )}
               {tradeResult.summary && (
                 <div style={{ fontSize: 11, color: '#475569' }}>
                   Cost: ${(tradeResult.summary.total_cost_cents / 100).toFixed(2)} ·
