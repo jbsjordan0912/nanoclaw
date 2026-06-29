@@ -1268,12 +1268,21 @@ async def trade_execute(req: SweepExecuteRequest):
     if not fills:
         return {"error": "No contracts available at these prices", "ok": False}
 
-    # Place orders at each price level
+    # UI only ever buys YES. The V2 schema's `side` is YES-leg only (bid=buy YES,
+    # ask=sell YES), so don't guess a NO mapping — fail loudly instead.
+    if req.side != "yes":
+        return {"error": f"Only YES buys are supported (got side={req.side})", "ok": False}
+
+    # Kalshi retired POST /portfolio/orders (HTTP 410 deprecated_v1_order_endpoint).
+    # Orders now go to /portfolio/events/orders with dollar-string price + count.
+    path = "/trade-api/v2/portfolio/events/orders"
+
+    # One immediate-or-cancel order per price level — IOC fills what's available at
+    # that price and cancels the rest (nothing left resting), keeping spend within budget.
     results = []
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             for fill in fills:
-                path = "/trade-api/v2/portfolio/orders"
                 auth = _kalshi_auth_headers("POST", path)
                 if not auth:
                     return {"error": "Kalshi auth not configured", "ok": False}
@@ -1281,17 +1290,17 @@ async def trade_execute(req: SweepExecuteRequest):
                 auth["content-type"] = "application/json"
 
                 order_body = {
-                    "action": "buy",
-                    "side": req.side,
                     "ticker": req.ticker,
-                    "type": "limit",
-                    "count": fill["contracts"],
-                    "yes_price": fill["price"] if req.side == "yes" else (100 - fill["price"]),
-                    "client_order_id": str(uuid.uuid4()),  # required by Kalshi; also idempotency key
+                    "side": "bid",  # buy YES
+                    "count": f"{fill['contracts']:.2f}",
+                    "price": f"{fill['price'] / 100:.4f}",
+                    "time_in_force": "immediate_or_cancel",
+                    "self_trade_prevention_type": "taker_at_cross",
+                    "client_order_id": str(uuid.uuid4()),
                 }
 
                 r = await client.post(
-                    f"{KALSHI_API_BASE}/portfolio/orders",
+                    f"{KALSHI_API_BASE}/portfolio/events/orders",
                     headers=auth,
                     json=order_body,
                 )
@@ -1301,8 +1310,13 @@ async def trade_execute(req: SweepExecuteRequest):
                     "contracts": fill["contracts"],
                     "status_code": r.status_code,
                 }
-                if r.status_code == 200 or r.status_code == 201:
-                    order_result["order"] = r.json()
+                if r.status_code in (200, 201):
+                    body = r.json()
+                    try:
+                        order_result["filled"] = int(float(body.get("fill_count", 0)))
+                    except (TypeError, ValueError):
+                        order_result["filled"] = 0
+                    order_result["order"] = body
                     order_result["ok"] = True
                 else:
                     order_result["error"] = r.text
@@ -1314,15 +1328,16 @@ async def trade_execute(req: SweepExecuteRequest):
         return {"error": str(e), "ok": False, "partial_results": results}
 
     successful = sum(1 for r in results if r.get("ok"))
+    filled_contracts = sum(r.get("filled", 0) for r in results if r.get("ok"))
     return {
-        "ok": successful > 0,
+        "ok": filled_contracts > 0,
         "orders": results,
         "summary": {
             "total_orders": len(results),
             "successful": successful,
             "failed": len(results) - successful,
-            "total_contracts": sum(r["contracts"] for r in results if r.get("ok")),
-            "total_cost_cents": sum(r["price"] * r["contracts"] for r in results if r.get("ok")),
+            "total_contracts": filled_contracts,
+            "total_cost_cents": sum(r["price"] * r.get("filled", 0) for r in results if r.get("ok")),
         }
     }
 
