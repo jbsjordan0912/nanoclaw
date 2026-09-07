@@ -2512,17 +2512,28 @@ async def _ff_cached(key: str, fetcher):
     return data
 
 
-async def _ff_src_fantasypros() -> dict:
-    """Expert Consensus Rank, scraped from the embedded `ecrData` blob."""
+# FantasyPros publishes a separate cheatsheet per position, and those carry
+# POSITIONAL tiers. The overall page's tiers are cross-positional, so "T3"
+# there means something different from "RB T3".
+_FF_FP_PAGES = {"QB": "qb-cheatsheets", "RB": "ppr-rb-cheatsheets",
+                "WR": "ppr-wr-cheatsheets", "TE": "ppr-te-cheatsheets",
+                "K": "k-cheatsheets", "DEF": "dst-cheatsheets"}
+
+
+async def _ff_fp_page(slug: str) -> dict:
+    """Fetch one FantasyPros cheatsheet and parse its embedded `ecrData`."""
     import httpx
-    url = "https://www.fantasypros.com/nfl/rankings/ppr-cheatsheets.php"
+    url = f"https://www.fantasypros.com/nfl/rankings/{slug}.php"
     async with httpx.AsyncClient(timeout=25.0, follow_redirects=True) as client:
         r = await client.get(url, headers={"User-Agent": _FF_UA})
         r.raise_for_status()
     m = re.search(r"var\s+ecrData\s*=\s*(\{.*?\});\s*\n", r.text, re.S)
     if not m:
-        raise RuntimeError("FantasyPros page shape changed — ecrData not found")
-    blob = json.loads(m.group(1))
+        raise RuntimeError(f"FantasyPros page shape changed — ecrData not found ({slug})")
+    return json.loads(m.group(1))
+
+
+def _ff_fp_rows(blob: dict) -> dict:
     out = {}
     for p in blob.get("players", []):
         pos = _ff_pos(p.get("player_position_id"))
@@ -2534,8 +2545,34 @@ async def _ff_src_fantasypros() -> dict:
             "worst": _ff_f(p.get("rank_max")), "tier": _ff_f(p.get("tier")),
             "bye": p.get("player_bye_week") or None,
         }
-    return {"players": out, "meta": {"experts": blob.get("total_experts"),
-                                     "updated": blob.get("last_updated")}}
+    return out
+
+
+async def _ff_src_fantasypros() -> dict:
+    """Expert Consensus Rank, scraped from the embedded `ecrData` blob."""
+    blob = await _ff_fp_page("ppr-cheatsheets")
+    return {"players": _ff_fp_rows(blob), "meta": {"experts": blob.get("total_experts"),
+                                                   "updated": blob.get("last_updated")}}
+
+
+async def _ff_fp_positional() -> dict:
+    """Per-position tiers. Enrichment only — this is the same opinion as the
+    overall FantasyPros feed, so it must never be counted as a sixth source."""
+    async def one(pos, slug):
+        blob = await _ff_fp_page(slug)
+        return pos, _ff_fp_rows(blob)
+
+    done = await asyncio.gather(*[one(p, s) for p, s in _FF_FP_PAGES.items()],
+                                return_exceptions=True)
+    out = {}
+    for res in done:
+        if isinstance(res, Exception):
+            continue                       # that position simply has no tier
+        pos, rows = res
+        for k, row in rows.items():
+            out[k] = {"pos_tier": int(row["tier"]) if row.get("tier") is not None else None,
+                      "pos_ecr": row.get("ecr"), "pos_rank_fp": row.get("rank")}
+    return out
 
 
 async def _ff_src_espn() -> dict:
@@ -2722,6 +2759,15 @@ async def nfl_fantasy_draftboard(
     if not loaded:
         raise HTTPException(502, "Every fantasy source failed — see /api/nfl/fantasy/state")
 
+    # Positional tiers ride along with the FantasyPros source; if the scrape
+    # fails the board still renders, just without them.
+    pos_tiers = {}
+    if "fantasypros" in loaded:
+        try:
+            pos_tiers = await _ff_cached("fantasypros_pos", _ff_fp_positional)
+        except Exception:
+            pos_tiers = {}
+
     # Union of players, then average whatever ranks exist for each.
     merged = {}
     for key, players in loaded.items():
@@ -2769,6 +2815,7 @@ async def nfl_fantasy_draftboard(
             "high": round(min(vals), 1), "low": round(max(vals), 1),
             "spread": round(max(vals) - min(vals), 1),
             "tier": int(fp["tier"]) if fp.get("tier") is not None else None,
+            "pos_tier": (pos_tiers.get(m["key"]) or {}).get("pos_tier"),
             "ecr_std": fp.get("std"),
             "proj": (src.get("sleeper") or {}).get("proj"),
             "adp_avg": round(sum(adps) / len(adps), 1) if adps else None,

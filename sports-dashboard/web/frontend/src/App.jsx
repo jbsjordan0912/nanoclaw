@@ -2831,6 +2831,13 @@ function FantasyTab() {
     .filter(p => !(hideDrafted && drafted.includes(p.key)))
     .filter(p => !(hideKeepers && FF_KEEPER_OWNER[p.key]))
   const keepersOnBoard = all.filter(p => FF_KEEPER_OWNER[p.key]).length
+  // FantasyPros' overall tiers are cross-positional, so they answer a different
+  // question than "which tier of RB is he". Show the positional tier whenever a
+  // single position is in view.
+  const singlePos = !['ALL', 'FLEX'].includes(position)
+  const tierBadge = (p) => singlePos && p.pos_tier != null
+    ? `${p.pos} T${p.pos_tier}`
+    : p.tier != null ? `T${p.tier}` : null
   const maxSpread = Math.max(20, ...all.map(p => p.spread || 0))
   const okSources = (data?.sources || []).filter(s => s.ok)
 
@@ -2969,7 +2976,7 @@ function FantasyTab() {
                   <span style={{ color: FF_POS_COLOR[p.pos] || '#64748b', fontWeight: 600 }}>{p.pos_label}</span>
                   <span>· {p.team}</span>
                   {p.bye && <span>· bye {p.bye}</span>}
-                  {p.tier != null && <span style={{ color: '#475569' }}>· T{p.tier}</span>}
+                  {tierBadge(p) && <span style={{ color: '#475569' }}>· {tierBadge(p)}</span>}
                   {FF_KEEPER_OWNER[p.key] && (
                     <span style={{
                       color: '#a855f7', fontWeight: 700, border: '1px solid rgba(168,85,247,0.4)',
@@ -3029,6 +3036,8 @@ function FantasyTab() {
                 <div style={{ display: 'flex', gap: 12, fontSize: 10, color: '#64748b', marginBottom: 8, fontVariantNumeric: 'tabular-nums' }}>
                   {p.proj != null && <span>Proj <b style={{ color: '#94a3b8' }}>{p.proj.toFixed(1)}</b> pts</span>}
                   {p.ecr_std != null && <span>ECR σ <b style={{ color: '#94a3b8' }}>{p.ecr_std.toFixed(1)}</b></span>}
+                  {p.pos_tier != null && <span>{p.pos} tier <b style={{ color: '#94a3b8' }}>{p.pos_tier}</b></span>}
+                  {p.tier != null && <span>Ovr tier <b style={{ color: '#94a3b8' }}>{p.tier}</b></span>}
                   <span>Spread <b style={{ color: p.spread > maxSpread * 0.5 ? '#f59e0b' : '#94a3b8' }}>{p.spread.toFixed(0)}</b></span>
                 </div>
                 <button onClick={() => toggleDrafted(p.key)} style={{
