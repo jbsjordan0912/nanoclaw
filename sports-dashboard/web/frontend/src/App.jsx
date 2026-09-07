@@ -2700,6 +2700,257 @@ function HRScannerTab() {
   )
 }
 
+// ── Fantasy draft board (multi-source PPR consensus) ─────────────────────────
+const FF_POSITIONS = ['ALL', 'FLEX', 'QB', 'RB', 'WR', 'TE', 'K', 'DEF']
+const FF_SORTS = [['consensus', 'Board'], ['value', 'Value'], ['spread', 'Disagree']]
+const FF_POS_COLOR = { QB: '#f97316', RB: '#22c55e', WR: '#3b82f6', TE: '#a855f7', K: '#eab308', DEF: '#64748b' }
+const FF_SRC_COLOR = {
+  fantasypros: '#3b82f6', espn: '#ef4444', yahoo: '#a855f7', ffc: '#22c55e', sleeper: '#f59e0b',
+}
+const FF_SRC_SHORT = { fantasypros: 'FPros', espn: 'ESPN', yahoo: 'Yahoo', ffc: 'FFC', sleeper: 'Sleep' }
+
+const ffInjColor = (s) => {
+  if (!s) return null
+  if (/^(out|ir|pup|sus|na)/i.test(s)) return '#ef4444'
+  if (/doubt/i.test(s)) return '#f97316'
+  return '#f59e0b'
+}
+const ffInj = (s) => !s ? '' : /doubt/i.test(s) ? 'D' : /quest/i.test(s) ? 'Q' : s.slice(0, 3).toUpperCase()
+
+function FantasyTab() {
+  const [position, setPosition] = useState('ALL')
+  const [sort, setSort] = useState('consensus')
+  const [search, setSearch] = useState('')
+  const [data, setData] = useState(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+  const [openKey, setOpenKey] = useState(null)
+  const [hideDrafted, setHideDrafted] = useState(true)
+  // Draft night survives a refresh.
+  const [drafted, setDrafted] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('ff_drafted') || '[]') } catch { return [] }
+  })
+
+  useEffect(() => {
+    try { localStorage.setItem('ff_drafted', JSON.stringify(drafted)) } catch { /* private mode */ }
+  }, [drafted])
+
+  const load = useCallback(async () => {
+    setLoading(true); setError('')
+    try {
+      const p = new URLSearchParams({ position, search, limit: 300, min_sources: 2 })
+      const res = await fetch(`${API}/api/nfl/fantasy/draftboard?${p}`)
+      if (!res.ok) throw new Error(`API ${res.status}`)
+      setData(await res.json())
+    } catch (e) { setError(e.message); setData(null) }
+    setLoading(false)
+  }, [position, search])
+
+  useEffect(() => {
+    const t = setTimeout(load, search ? 350 : 0)
+    return () => clearTimeout(t)
+  }, [load])
+
+  const toggleDrafted = (key) =>
+    setDrafted(d => d.includes(key) ? d.filter(x => x !== key) : [...d, key])
+
+  const all = data?.players || []
+  const sorted = [...all].sort((a, b) =>
+    sort === 'value' ? (b.value ?? -999) - (a.value ?? -999)
+      : sort === 'spread' ? b.spread - a.spread
+      : a.consensus - b.consensus)
+  const rows = hideDrafted ? sorted.filter(p => !drafted.includes(p.key)) : sorted
+  const maxSpread = Math.max(20, ...all.map(p => p.spread || 0))
+  const okSources = (data?.sources || []).filter(s => s.ok)
+
+  const ctlStyle = {
+    padding: '8px 10px', borderRadius: 8, background: '#1e293b', border: '1px solid #334155',
+    color: '#f1f5f9', fontSize: 13, outline: 'none', width: '100%', boxSizing: 'border-box',
+  }
+
+  return (
+    <div>
+      {/* Source status */}
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 8 }}>
+        {(data?.sources || []).map(s => (
+          <div key={s.key} title={s.ok ? `${s.count} players` : s.error} style={{
+            fontSize: 10, fontWeight: 600, padding: '3px 7px', borderRadius: 999,
+            background: s.ok ? 'rgba(255,255,255,0.04)' : 'rgba(239,68,68,0.12)',
+            border: `1px solid ${s.ok ? FF_SRC_COLOR[s.key] || '#334155' : '#ef4444'}`,
+            color: s.ok ? FF_SRC_COLOR[s.key] || '#94a3b8' : '#ef4444',
+          }}>{s.ok ? FF_SRC_SHORT[s.key] || s.label : `${FF_SRC_SHORT[s.key] || s.label} ✕`}</div>
+        ))}
+        {data && (
+          <div style={{ fontSize: 10, color: '#475569', alignSelf: 'center', marginLeft: 'auto' }}>
+            {okSources.length}/{(data.sources || []).length} sources · PPR
+          </div>
+        )}
+      </div>
+
+      {/* Position chips */}
+      <div style={{ display: 'flex', gap: 4, marginBottom: 8, overflowX: 'auto', paddingBottom: 2 }}>
+        {FF_POSITIONS.map(p => (
+          <button key={p} onClick={() => setPosition(p)} style={{
+            flex: '0 0 auto', padding: '6px 11px', borderRadius: 999, fontSize: 12, fontWeight: 600,
+            cursor: 'pointer', border: `1px solid ${position === p ? '#2563eb' : '#334155'}`,
+            background: position === p ? '#2563eb' : 'transparent',
+            color: position === p ? '#fff' : '#64748b',
+          }}>{p}</button>
+        ))}
+      </div>
+
+      {/* Sort + search */}
+      <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+        <div style={{ display: 'flex', borderRadius: 8, overflow: 'hidden', border: '1px solid #334155', flex: '0 0 auto' }}>
+          {FF_SORTS.map(([id, label]) => (
+            <button key={id} onClick={() => setSort(id)} style={{
+              padding: '8px 10px', border: 'none', fontSize: 12, fontWeight: 600, cursor: 'pointer',
+              background: sort === id ? '#2563eb' : '#1e293b', color: sort === id ? '#fff' : '#64748b',
+            }}>{label}</button>
+          ))}
+        </div>
+        <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search…" style={ctlStyle} />
+      </div>
+
+      {/* Draft tracker */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: '#94a3b8', cursor: 'pointer' }}>
+          <input type="checkbox" checked={hideDrafted} onChange={e => setHideDrafted(e.target.checked)} />
+          Hide drafted ({drafted.length})
+        </label>
+        {drafted.length > 0 && (
+          <button onClick={() => setDrafted([])} style={{
+            marginLeft: 'auto', background: 'none', border: 'none', color: '#64748b',
+            fontSize: 11, cursor: 'pointer', padding: 0,
+          }}>reset board</button>
+        )}
+      </div>
+
+      <div style={{ fontSize: 10, color: '#475569', marginBottom: 8 }}>
+        {loading ? 'Loading…' : error ? '' : data
+          ? `${rows.length} of ${data.total} · ${data.season} · tap a row for source split`
+          : ''}
+      </div>
+
+      {error && <div style={{ color: '#ef4444', fontSize: 13, padding: 12 }}>Failed to load: {error}</div>}
+      {!loading && !error && rows.length === 0 && (
+        <div style={{ color: '#64748b', fontSize: 13, padding: 12, textAlign: 'center' }}>No players match.</div>
+      )}
+
+      {/* Column header */}
+      {rows.length > 0 && (
+        <div style={{ display: 'flex', gap: 8, padding: '0 10px 5px', fontSize: 9, color: '#475569', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+          <div style={{ width: 26 }}>#</div>
+          <div style={{ flex: 1 }}>Player</div>
+          <div style={{ width: 42, textAlign: 'right' }}>Cons</div>
+          <div style={{ width: 42, textAlign: 'right' }}>ADP</div>
+          <div style={{ width: 34, textAlign: 'right' }}>Val</div>
+        </div>
+      )}
+
+      {rows.map((p, i) => {
+        const isOpen = openKey === p.key
+        const isDrafted = drafted.includes(p.key)
+        const injColor = ffInjColor(p.inj)
+        return (
+          <div key={p.key} style={{
+            marginBottom: 3, borderRadius: 8, overflow: 'hidden',
+            background: isOpen ? '#172033' : i % 2 === 0 ? '#1e293b' : '#0f172a',
+            borderLeft: `3px solid ${FF_POS_COLOR[p.pos] || 'transparent'}`,
+            opacity: isDrafted ? 0.45 : 1,
+          }}>
+            <div onClick={() => setOpenKey(isOpen ? null : p.key)}
+              style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '9px 10px', cursor: 'pointer' }}>
+              <div style={{ width: 26, fontSize: 12, color: '#64748b', fontVariantNumeric: 'tabular-nums' }}>{p.ovr_rank}</div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{
+                  fontSize: 13, fontWeight: 600, color: '#e2e8f0', whiteSpace: 'nowrap',
+                  overflow: 'hidden', textOverflow: 'ellipsis',
+                  textDecoration: isDrafted ? 'line-through' : 'none',
+                }}>
+                  {p.name}
+                  {injColor && <span style={{ marginLeft: 5, fontSize: 9, fontWeight: 700, color: injColor }}>{ffInj(p.inj)}</span>}
+                </div>
+                <div style={{ fontSize: 10, color: '#64748b', marginTop: 1, display: 'flex', alignItems: 'center', gap: 4 }}>
+                  <span style={{ color: FF_POS_COLOR[p.pos] || '#64748b', fontWeight: 600 }}>{p.pos_label}</span>
+                  <span>· {p.team}</span>
+                  {p.bye && <span>· bye {p.bye}</span>}
+                  {p.tier != null && <span style={{ color: '#475569' }}>· T{p.tier}</span>}
+                  {/* disagreement bar */}
+                  <span style={{ flex: 1, height: 3, background: '#0f172a', borderRadius: 2, marginLeft: 2, maxWidth: 46 }}>
+                    <span style={{
+                      display: 'block', height: '100%', borderRadius: 2,
+                      width: `${Math.min(100, (p.spread / maxSpread) * 100)}%`,
+                      background: p.spread > maxSpread * 0.5 ? '#f59e0b' : '#334155',
+                    }} />
+                  </span>
+                </div>
+              </div>
+              <div style={{ width: 42, textAlign: 'right', fontSize: 14, fontWeight: 700, color: '#e2e8f0', fontVariantNumeric: 'tabular-nums' }}>
+                {p.consensus.toFixed(1)}
+              </div>
+              <div style={{ width: 42, textAlign: 'right', fontSize: 12, color: '#94a3b8', fontVariantNumeric: 'tabular-nums' }}>
+                {p.adp_avg != null ? p.adp_avg.toFixed(1) : '—'}
+              </div>
+              <div style={{
+                width: 34, textAlign: 'right', fontSize: 12, fontWeight: 600, fontVariantNumeric: 'tabular-nums',
+                color: p.value == null ? '#475569' : p.value >= 5 ? '#22c55e' : p.value <= -5 ? '#ef4444' : '#94a3b8',
+              }}>
+                {p.value == null ? '—' : `${p.value > 0 ? '+' : ''}${p.value.toFixed(0)}`}
+              </div>
+            </div>
+
+            {/* Per-source split */}
+            {isOpen && (
+              <div style={{ padding: '0 10px 10px', borderTop: '1px solid #1e293b' }}>
+                <div style={{ fontSize: 9, color: '#475569', textTransform: 'uppercase', letterSpacing: '0.05em', margin: '8px 0 6px' }}>
+                  Rank by source · {p.n_sources} of 5 · range {p.high.toFixed(0)}–{p.low.toFixed(0)}
+                </div>
+                <div style={{ display: 'flex', gap: 4, marginBottom: 8 }}>
+                  {Object.keys(FF_SRC_COLOR).map(k => {
+                    const v = p.ranks[k]
+                    return (
+                      <div key={k} style={{
+                        flex: 1, textAlign: 'center', padding: '6px 2px', borderRadius: 6,
+                        background: '#0f172a', border: `1px solid ${v != null ? FF_SRC_COLOR[k] : '#1e293b'}`,
+                        opacity: v != null ? 1 : 0.35,
+                      }}>
+                        <div style={{ fontSize: 8, color: '#64748b', textTransform: 'uppercase' }}>{FF_SRC_SHORT[k]}</div>
+                        <div style={{ fontSize: 14, fontWeight: 700, color: v != null ? FF_SRC_COLOR[k] : '#475569', fontVariantNumeric: 'tabular-nums' }}>
+                          {v != null ? v.toFixed(0) : '—'}
+                        </div>
+                        {p.adp[k] != null && (
+                          <div style={{ fontSize: 8, color: '#475569', fontVariantNumeric: 'tabular-nums' }}>adp {p.adp[k].toFixed(0)}</div>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+                <div style={{ display: 'flex', gap: 12, fontSize: 10, color: '#64748b', marginBottom: 8, fontVariantNumeric: 'tabular-nums' }}>
+                  {p.proj != null && <span>Proj <b style={{ color: '#94a3b8' }}>{p.proj.toFixed(1)}</b> pts</span>}
+                  {p.ecr_std != null && <span>ECR σ <b style={{ color: '#94a3b8' }}>{p.ecr_std.toFixed(1)}</b></span>}
+                  <span>Spread <b style={{ color: p.spread > maxSpread * 0.5 ? '#f59e0b' : '#94a3b8' }}>{p.spread.toFixed(0)}</b></span>
+                </div>
+                <button onClick={() => toggleDrafted(p.key)} style={{
+                  width: '100%', padding: '8px 0', borderRadius: 8, border: 'none', fontSize: 12, fontWeight: 700,
+                  cursor: 'pointer', background: isDrafted ? '#334155' : '#2563eb', color: '#fff',
+                }}>{isDrafted ? 'Undo — put back on board' : 'Mark drafted'}</button>
+              </div>
+            )}
+          </div>
+        )
+      })}
+
+      {rows.length > 0 && (
+        <div style={{ fontSize: 10, color: '#475569', marginTop: 8, lineHeight: 1.5 }}>
+          Cons = mean rank across sources. Val = avg ADP minus board rank; positive means he's
+          lasting past where the experts have him. The amber bar flags where the sources disagree most.
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Root App ──────────────────────────────────────────────────────────────────
 export default function App() {
   const [tab, setTab] = useState('research')
@@ -2715,7 +2966,7 @@ export default function App() {
       </div>
 
       {/* Tab switcher */}
-      <div style={{ display: 'flex', borderRadius: 10, overflow: 'hidden', border: '1px solid #1e293b', marginBottom: 20, background: '#1e293b' }}>
+      <div style={{ display: 'flex', borderRadius: 10, overflowX: 'auto', overflowY: 'hidden', border: '1px solid #1e293b', marginBottom: 20, background: '#1e293b' }}>
         {[
           { id: 'research', label: '🔍 Research' },
           { id: 'sim',      label: '⚾ Sim' },
@@ -2723,9 +2974,10 @@ export default function App() {
           { id: 'plakata',  label: '💥 PitchPulse' },
           { id: 'spring',   label: '🌸 Odds' },
           { id: 'hr',       label: '💣 HR' },
+          { id: 'ff',       label: '🏈 FF' },
         ].map(t => (
           <button key={t.id} onClick={() => setTab(t.id)} style={{
-            flex: 1, padding: '11px 0', border: 'none', fontSize: 13, fontWeight: 600,
+            flex: '1 0 auto', padding: '11px 12px', border: 'none', fontSize: 12, fontWeight: 600, whiteSpace: 'nowrap',
             background: tab === t.id ? '#2563eb' : 'transparent',
             color: tab === t.id ? '#fff' : '#64748b',
             cursor: 'pointer', transition: 'background 0.15s',
@@ -2733,7 +2985,7 @@ export default function App() {
         ))}
       </div>
 
-      {tab === 'research' ? <ResearchTab /> : tab === 'sim' ? <AtBatTab /> : tab === 'batch' ? <BatchSimTab /> : tab === 'plakata' ? <PlakataTab /> : tab === 'hr' ? <HRScannerTab /> : <SpringOddsTab />}
+      {tab === 'research' ? <ResearchTab /> : tab === 'sim' ? <AtBatTab /> : tab === 'batch' ? <BatchSimTab /> : tab === 'plakata' ? <PlakataTab /> : tab === 'hr' ? <HRScannerTab /> : tab === 'ff' ? <FantasyTab /> : <SpringOddsTab />}
 
       <style>{`
         * { box-sizing: border-box; }
