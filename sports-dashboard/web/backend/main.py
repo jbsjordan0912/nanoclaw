@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
 from dotenv import load_dotenv
-import asyncio, base64, time, json, hashlib, hmac, uuid
+import asyncio, base64, time, json, hashlib, hmac, uuid, re
 from datetime import datetime, timezone, timedelta
 
 # Load backend .env first (Kalshi keys), then data-pipeline .env (Supabase etc.)
@@ -2225,3 +2225,571 @@ async def nfl_draft_positional(position: str = "QB"):
     pos_upper = position.upper()
     ordered_keys = [f"{o} {pos_upper}" for o in ["1st", "2nd", "3rd", "4th", "5th"]]
     return {k: groups[k] for k in ordered_keys if k in groups}
+
+
+# ---------------------------------------------------------------------------
+# NFL Fantasy Football (Sleeper)
+#
+# Three upstream feeds, all free / no auth:
+#   /v1/state/nfl                          -> current season + week
+#   /v1/players/nfl                        -> player metadata (~15MB, slimmed on ingest)
+#   /v1/projections/nfl/regular/{season}[/{week}]  -> projected pts + ADP
+# Everything is cached in-process; the players blob is big enough that we only
+# keep the handful of fields the tab renders.
+# ---------------------------------------------------------------------------
+
+_FF_POSITIONS = ("QB", "RB", "WR", "TE", "K", "DEF")
+_FF_SCORING = {"ppr": ("pts_ppr", "adp_ppr"),
+               "half_ppr": ("pts_half_ppr", "adp_half_ppr"),
+               "std": ("pts_std", "adp_std")}
+
+_FF_STATE = {"at": 0.0, "data": None}
+_FF_PLAYERS = {"at": 0.0, "data": None}
+_FF_PROJ = {}                      # cache key -> {"at": float, "data": dict}
+_FF_STATE_TTL = 3600.0             # season/week rolls over slowly
+_FF_PLAYERS_TTL = 12 * 3600.0      # roster metadata; injuries move faster than this
+_FF_PROJ_TTL = 900.0
+_ff_lock = asyncio.Lock()
+
+
+async def _ff_get(url: str, timeout: float = 30.0):
+    import httpx
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        r = await client.get(url, headers={"accept": "application/json"})
+        if r.status_code != 200:
+            raise HTTPException(502, f"Sleeper returned {r.status_code} for {url}")
+        return r.json()
+
+
+async def _ff_state() -> dict:
+    if _FF_STATE["data"] and time.time() - _FF_STATE["at"] < _FF_STATE_TTL:
+        return _FF_STATE["data"]
+    data = await _ff_get("https://api.sleeper.app/v1/state/nfl", timeout=10.0)
+    _FF_STATE.update(at=time.time(), data=data)
+    return data
+
+
+async def _ff_players() -> dict:
+    """player_id -> slim metadata, for fantasy-relevant positions only."""
+    if _FF_PLAYERS["data"] and time.time() - _FF_PLAYERS["at"] < _FF_PLAYERS_TTL:
+        return _FF_PLAYERS["data"]
+
+    raw = await _ff_get("https://api.sleeper.app/v1/players/nfl", timeout=60.0)
+    slim = {}
+    for pid, p in raw.items():
+        pos = p.get("position")
+        if pos not in _FF_POSITIONS or not p.get("active"):
+            continue
+        slim[pid] = {
+            "id": pid,
+            "name": p.get("full_name") or f"{p.get('first_name','')} {p.get('last_name','')}".strip() or pid,
+            "pos": pos,
+            "team": p.get("team") or p.get("team_abbr") or "FA",
+            "inj": p.get("injury_status"),
+            "depth": p.get("depth_chart_order"),
+            "search_rank": p.get("search_rank"),
+            "years_exp": p.get("years_exp"),
+        }
+    del raw                                   # 15MB of JSON we do not want resident
+    _FF_PLAYERS.update(at=time.time(), data=slim)
+    return slim
+
+
+async def _ff_projections(season: str, week=None) -> dict:
+    """player_id -> stat dict. week=None gives season totals (which carry ADP)."""
+    key = f"{season}/{week}" if week else season
+    hit = _FF_PROJ.get(key)
+    if hit and time.time() - hit["at"] < _FF_PROJ_TTL:
+        return hit["data"]
+
+    url = f"https://api.sleeper.app/v1/projections/nfl/regular/{season}"
+    if week:
+        url += f"/{week}"
+    data = await _ff_get(url, timeout=30.0)
+    data = {k: v for k, v in data.items() if isinstance(v, dict)}
+    _FF_PROJ[key] = {"at": time.time(), "data": data}
+    return data
+
+
+def _ff_num(stats: dict, field: str):
+    v = stats.get(field)
+    if v is None:
+        return None
+    try:
+        return round(float(v), 2)
+    except (TypeError, ValueError):
+        return None
+
+
+def _ff_adp(stats: dict, field: str):
+    """Sleeper parks undrafted players at 999/1000 — treat those as no ADP."""
+    v = _ff_num(stats, field)
+    return None if v is None or v >= 999 else v
+
+
+@app.get("/api/nfl/fantasy/rankings")
+async def nfl_fantasy_rankings(
+    scoring: str = "ppr",
+    position: str = "ALL",
+    week: str = "season",
+    limit: int = 250,
+    search: str = "",
+):
+    """Fantasy rankings: projected points, ADP, and the gap between them.
+
+    scoring:  ppr | half_ppr | std
+    position: ALL | QB | RB | WR | TE | K | DEF | FLEX
+    week:     "season" for full-season totals, or a week number (1-18)
+    """
+    scoring = scoring.lower()
+    if scoring not in _FF_SCORING:
+        raise HTTPException(400, f"Invalid scoring. Choose from: {', '.join(_FF_SCORING)}")
+    pts_field, adp_field = _FF_SCORING[scoring]
+
+    position = position.upper()
+    if position == "FLEX":
+        wanted = {"RB", "WR", "TE"}
+    elif position == "ALL":
+        wanted = set(_FF_POSITIONS)
+    elif position in _FF_POSITIONS:
+        wanted = {position}
+    else:
+        raise HTTPException(400, f"Invalid position. Choose from: ALL, FLEX, {', '.join(_FF_POSITIONS)}")
+
+    state = await _ff_state()
+    season = state.get("season") or str(datetime.now().year)
+
+    wk = None
+    if week != "season":
+        try:
+            wk = int(week)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "week must be 'season' or a week number")
+        if not 1 <= wk <= 18:
+            raise HTTPException(400, "week must be between 1 and 18")
+
+    async with _ff_lock:
+        players = await _ff_players()
+        # Season totals carry ADP even when the caller asked for a single week.
+        season_proj = await _ff_projections(season)
+        proj = season_proj if wk is None else await _ff_projections(season, wk)
+
+    q = search.strip().lower()
+    rows = []
+    for pid, meta in players.items():
+        if meta["pos"] not in wanted:
+            continue
+        if q and q not in meta["name"].lower():
+            continue
+        stats = proj.get(pid) or {}
+        pts = _ff_num(stats, pts_field)
+        adp = _ff_adp(season_proj.get(pid) or {}, adp_field)
+        if not pts and adp is None:
+            continue                          # irrelevant to fantasy this season
+        rows.append({**meta, "proj": pts or 0.0, "adp": adp})
+
+    rows.sort(key=lambda r: -r["proj"])
+
+    # Overall + positional ranks are by projection; adp_delta is how much later
+    # the draft room is taking him than the projection says it should.
+    pos_seen = {}
+    for i, r in enumerate(rows, 1):
+        r["ovr_rank"] = i
+        pos_seen[r["pos"]] = pos_seen.get(r["pos"], 0) + 1
+        r["pos_rank"] = pos_seen[r["pos"]]
+        r["pos_label"] = f"{r['pos']}{r['pos_rank']}"
+        r["adp_delta"] = round(r["adp"] - i, 1) if r["adp"] is not None else None
+        r.pop("search_rank", None)
+
+    return {
+        "season": season,
+        "week": wk or "season",
+        "current_week": state.get("week"),
+        "scoring": scoring,
+        "position": position,
+        "total": len(rows),
+        "players": rows[:max(1, min(limit, 500))],
+    }
+
+
+@app.get("/api/nfl/fantasy/state")
+async def nfl_fantasy_state():
+    """Current NFL season/week, plus what the fantasy caches are holding."""
+    state = await _ff_state()
+    return {
+        "season": state.get("season"),
+        "week": state.get("week"),
+        "season_type": state.get("season_type"),
+        "season_start_date": state.get("season_start_date"),
+        "players_cached": len(_FF_PLAYERS["data"] or {}),
+        "projections_cached": list(_FF_PROJ.keys()),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Fantasy draft board — multi-source consensus (PPR)
+#
+# Five public, no-auth sources. Each is normalised to "this source's rank for
+# this player"; the board is the mean of whichever sources have him. Sources
+# fail independently — a scrape that breaks drops out of the consensus rather
+# than taking the endpoint down with it.
+#
+#   fantasypros  ECR from 100+ experts (scraped from the cheatsheet page)
+#   espn         PPR draft rank + ADP + % rostered
+#   yahoo        public draft analysis: avg pick, round, auction cost
+#   ffc          FantasyFootballCalculator: ADP from real mock drafts
+#   sleeper      ADP + season projections
+# ---------------------------------------------------------------------------
+
+_FF_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+          "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
+
+_FF_TEAM_ALIAS = {"JAC": "JAX", "WSH": "WAS", "LA": "LAR", "OAK": "LV", "SD": "LAC",
+                  "ARZ": "ARI", "TAM": "TB", "NOR": "NO", "KAN": "KC", "SFO": "SF",
+                  "GNB": "GB", "NWE": "NE", "CLV": "CLE", "BLT": "BAL", "HST": "HOU"}
+
+_FF_ESPN_TEAMS = {1:"ATL",2:"BUF",3:"CHI",4:"CIN",5:"CLE",6:"DAL",7:"DEN",8:"DET",
+                  9:"GB",10:"TEN",11:"IND",12:"KC",13:"LV",14:"LAR",15:"MIA",16:"MIN",
+                  17:"NE",18:"NO",19:"NYG",20:"NYJ",21:"PHI",22:"ARI",23:"PIT",24:"LAC",
+                  25:"SF",26:"SEA",27:"TB",28:"WAS",29:"CAR",30:"JAX",33:"BAL",34:"HOU"}
+_FF_ESPN_POS = {1: "QB", 2: "RB", 3: "WR", 4: "TE", 5: "K", 16: "DEF"}
+
+_FF_SUFFIX_RE = re.compile(r"\b(jr|sr|ii|iii|iv|v)\.?$")
+_FF_DEF_WORDS_RE = re.compile(r"\b(d/st|dst|def|defense)\b")
+
+_FF_SRC_TTL = 1800.0
+_FF_SRC_CACHE = {}                 # source key -> {"at": float, "data": dict}
+_ff_board_lock = asyncio.Lock()
+
+
+def _ff_team(t):
+    if not t:
+        return "FA"
+    t = str(t).upper().strip()
+    return _FF_TEAM_ALIAS.get(t, t)
+
+
+def _ff_norm_name(n: str) -> str:
+    if not n:
+        return ""
+    n = n.lower().replace("&", "and")
+    n = _FF_DEF_WORDS_RE.sub("", n)
+    n = re.sub(r"[.'’,\-]", "", n)
+    n = re.sub(r"\s+", " ", n).strip()
+    return _FF_SUFFIX_RE.sub("", n).strip()
+
+
+def _ff_key(name: str, pos: str, team: str) -> str:
+    """Defenses are named five different ways across these sources, so key them
+    by team instead of by name. Everyone else keys on the normalised name."""
+    pos = (pos or "").upper().replace("DST", "DEF").replace("D/ST", "DEF")
+    if pos == "DEF":
+        return f"DEF:{_ff_team(team)}"
+    return _ff_norm_name(name)
+
+
+def _ff_f(v):
+    """FantasyPros hands back several numerics as strings ('1.30', '6')."""
+    if v is None or v == "":
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _ff_pos(pos: str) -> str:
+    pos = re.sub(r"\d+$", "", (pos or "").upper())
+    return "DEF" if pos in ("DST", "D/ST") else pos
+
+
+async def _ff_cached(key: str, fetcher):
+    hit = _FF_SRC_CACHE.get(key)
+    if hit and time.time() - hit["at"] < _FF_SRC_TTL:
+        return hit["data"]
+    data = await fetcher()
+    _FF_SRC_CACHE[key] = {"at": time.time(), "data": data}
+    return data
+
+
+async def _ff_src_fantasypros() -> dict:
+    """Expert Consensus Rank, scraped from the embedded `ecrData` blob."""
+    import httpx
+    url = "https://www.fantasypros.com/nfl/rankings/ppr-cheatsheets.php"
+    async with httpx.AsyncClient(timeout=25.0, follow_redirects=True) as client:
+        r = await client.get(url, headers={"User-Agent": _FF_UA})
+        r.raise_for_status()
+    m = re.search(r"var\s+ecrData\s*=\s*(\{.*?\});\s*\n", r.text, re.S)
+    if not m:
+        raise RuntimeError("FantasyPros page shape changed — ecrData not found")
+    blob = json.loads(m.group(1))
+    out = {}
+    for p in blob.get("players", []):
+        pos = _ff_pos(p.get("player_position_id"))
+        k = _ff_key(p.get("player_name"), pos, p.get("player_team_id"))
+        out[k] = {
+            "name": p.get("player_name"), "pos": pos, "team": _ff_team(p.get("player_team_id")),
+            "rank": _ff_f(p.get("rank_ecr")), "ecr": _ff_f(p.get("rank_ave")),
+            "std": _ff_f(p.get("rank_std")), "best": _ff_f(p.get("rank_min")),
+            "worst": _ff_f(p.get("rank_max")), "tier": _ff_f(p.get("tier")),
+            "bye": p.get("player_bye_week") or None,
+        }
+    return {"players": out, "meta": {"experts": blob.get("total_experts"),
+                                     "updated": blob.get("last_updated")}}
+
+
+async def _ff_src_espn() -> dict:
+    import httpx
+    url = ("https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/"
+           f"{_FF_SEASON_HINT[0]}/segments/0/leaguedefaults/3?view=kona_player_info")
+    filt = json.dumps({"players": {"limit": 350,
+                                   "sortDraftRanks": {"sortPriority": 100, "sortAsc": True, "value": "PPR"}}})
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        r = await client.get(url, headers={"User-Agent": _FF_UA, "accept": "application/json",
+                                           "x-fantasy-filter": filt})
+        r.raise_for_status()
+        blob = r.json()
+    out = {}
+    for e in blob.get("players", []):
+        p = e.get("player") or {}
+        rank = ((p.get("draftRanksByRankType") or {}).get("PPR") or {}).get("rank")
+        if not rank:
+            continue
+        pos = _FF_ESPN_POS.get(p.get("defaultPositionId"))
+        team = _FF_ESPN_TEAMS.get(p.get("proTeamId"), "FA")
+        own = p.get("ownership") or {}
+        out[_ff_key(p.get("fullName"), pos, team)] = {
+            "name": p.get("fullName"), "pos": pos, "team": team, "rank": rank,
+            "adp": own.get("averageDraftPosition"), "owned": own.get("percentOwned"),
+        }
+    return {"players": out, "meta": {}}
+
+
+async def _ff_src_yahoo() -> dict:
+    """Yahoo's read-only public API — draft analysis, no OAuth required."""
+    import httpx
+    out = {}
+    async with httpx.AsyncClient(timeout=25.0) as client:
+        for start in (0, 100, 200):
+            url = ("https://pub-api-ro.fantasysports.yahoo.com/fantasy/v2/game/nfl/players;"
+                   f"position=ALL;start={start};count=100;sort=rank_season;out=draft_analysis?format=json")
+            r = await client.get(url, headers={"User-Agent": _FF_UA})
+            if r.status_code != 200:
+                break
+            game = r.json().get("fantasy_content", {}).get("game", [])
+            node = next((g for g in game if isinstance(g, dict) and "players" in g), None)
+            if not node:
+                break
+            pls = node["players"]
+            for i in range(int(pls.get("count", 0) or 0)):
+                ent = pls.get(str(i), {}).get("player")
+                if not ent:
+                    continue
+                meta = ent[0]
+
+                def field(k, sub=None):
+                    for x in meta:
+                        if isinstance(x, dict) and k in x:
+                            return x[k][sub] if sub else x[k]
+                    return None
+
+                da = {}
+                for item in (ent[1].get("draft_analysis") or []) if len(ent) > 1 else []:
+                    da.update(item)
+
+                def num(k):
+                    v = da.get(k)
+                    try:
+                        return float(v)
+                    except (TypeError, ValueError):
+                        return None
+
+                name = field("name", "full")
+                pos = _ff_pos(field("display_position"))
+                team = _ff_team(field("editorial_team_abbr"))
+                out[_ff_key(name, pos, team)] = {
+                    "name": name, "pos": pos, "team": team, "rank": start + i + 1,
+                    "adp": num("average_pick"), "cost": num("average_cost"),
+                    "pct": num("percent_drafted"),
+                }
+    return {"players": out, "meta": {}}
+
+
+async def _ff_src_ffc() -> dict:
+    """ADP from real mock drafts run on FantasyFootballCalculator."""
+    import httpx
+    url = ("https://fantasyfootballcalculator.com/api/v1/adp/ppr"
+           f"?teams=12&year={_FF_SEASON_HINT[0]}&position=all")
+    async with httpx.AsyncClient(timeout=25.0) as client:
+        r = await client.get(url, headers={"User-Agent": _FF_UA})
+        r.raise_for_status()
+        blob = r.json()
+    out = {}
+    for i, p in enumerate(blob.get("players", []), 1):
+        pos = _ff_pos(p.get("position"))
+        out[_ff_key(p.get("name"), pos, p.get("team"))] = {
+            "name": p.get("name"), "pos": pos, "team": _ff_team(p.get("team")),
+            "rank": i, "adp": p.get("adp"), "std": p.get("stdev"),
+            "high": p.get("high"), "low": p.get("low"), "bye": p.get("bye"),
+            "times": p.get("times_drafted"),
+        }
+    meta = blob.get("meta") or {}
+    return {"players": out, "meta": {"drafts": meta.get("total_drafts"),
+                                     "window": f"{meta.get('start_date')} → {meta.get('end_date')}"}}
+
+
+async def _ff_src_sleeper() -> dict:
+    players = await _ff_players()
+    proj = await _ff_projections(_FF_SEASON_HINT[0])
+    ranked = []
+    for pid, meta in players.items():
+        st = proj.get(pid) or {}
+        adp = _ff_adp(st, "adp_ppr")
+        pts = _ff_num(st, "pts_ppr")
+        if adp is None and not pts:
+            continue
+        ranked.append((adp if adp is not None else 9999, pid, meta, adp, pts))
+    ranked.sort(key=lambda r: r[0])
+    out = {}
+    for i, (_, pid, meta, adp, pts) in enumerate(ranked, 1):
+        name = meta["name"] if meta["pos"] != "DEF" else meta["team"]
+        out[_ff_key(name, meta["pos"], meta["team"])] = {
+            "name": meta["name"], "pos": meta["pos"], "team": meta["team"],
+            "rank": i if adp is not None else None, "adp": adp, "proj": pts,
+            "inj": meta.get("inj"), "sleeper_id": pid,
+        }
+    return {"players": out, "meta": {}}
+
+
+_FF_SEASON_HINT = ["2026"]          # refreshed from Sleeper's state on each board build
+
+_FF_SOURCES = {
+    "fantasypros": ("FantasyPros ECR", _ff_src_fantasypros),
+    "espn":        ("ESPN",            _ff_src_espn),
+    "yahoo":       ("Yahoo",           _ff_src_yahoo),
+    "ffc":         ("FF Calculator",   _ff_src_ffc),
+    "sleeper":     ("Sleeper",         _ff_src_sleeper),
+}
+
+
+@app.get("/api/nfl/fantasy/draftboard")
+async def nfl_fantasy_draftboard(
+    position: str = "ALL",
+    limit: int = 200,
+    sources: str = "",
+    search: str = "",
+    min_sources: int = 1,
+):
+    """PPR draft board: consensus rank across every source that has the player.
+
+    position: ALL | FLEX | QB | RB | WR | TE | K | DEF
+    sources:  comma-separated subset of fantasypros,espn,yahoo,ffc,sleeper
+    min_sources: drop players ranked by fewer than N sources (2 cuts the deep tail)
+    """
+    position = position.upper()
+    if position == "FLEX":
+        wanted = {"RB", "WR", "TE"}
+    elif position == "ALL":
+        wanted = set(_FF_POSITIONS)
+    elif position in _FF_POSITIONS:
+        wanted = {position}
+    else:
+        raise HTTPException(400, f"Invalid position. Choose from: ALL, FLEX, {', '.join(_FF_POSITIONS)}")
+
+    picked = [s.strip().lower() for s in sources.split(",") if s.strip()] or list(_FF_SOURCES)
+    unknown = [s for s in picked if s not in _FF_SOURCES]
+    if unknown:
+        raise HTTPException(400, f"Unknown source(s): {', '.join(unknown)}")
+
+    state = await _ff_state()
+    _FF_SEASON_HINT[0] = state.get("season") or _FF_SEASON_HINT[0]
+
+    async with _ff_board_lock:
+        results = await asyncio.gather(
+            *[_ff_cached(k, _FF_SOURCES[k][1]) for k in picked], return_exceptions=True)
+
+    loaded, src_meta = {}, []
+    for key, res in zip(picked, results):
+        label = _FF_SOURCES[key][0]
+        if isinstance(res, Exception):
+            src_meta.append({"key": key, "label": label, "ok": False,
+                             "count": 0, "error": str(res)[:160]})
+            continue
+        loaded[key] = res["players"]
+        src_meta.append({"key": key, "label": label, "ok": True,
+                         "count": len(res["players"]), **(res.get("meta") or {})})
+
+    if not loaded:
+        raise HTTPException(502, "Every fantasy source failed — see /api/nfl/fantasy/state")
+
+    # Union of players, then average whatever ranks exist for each.
+    merged = {}
+    for key, players in loaded.items():
+        for pkey, row in players.items():
+            m = merged.setdefault(pkey, {"key": pkey, "ranks": {}, "adp": {}, "src": {}})
+            m["src"][key] = row
+            rk = _ff_f(row.get("rank"))
+            if rk:
+                m["ranks"][key] = rk
+            ad = _ff_f(row.get("adp"))
+            if ad is not None:
+                m["adp"][key] = round(ad, 1)
+
+    q = search.strip().lower()
+    rows = []
+    for m in merged.values():
+        src = m["src"]
+        # Prefer the source with the fullest metadata for display fields.
+        pick = lambda f: next((src[k][f] for k in ("fantasypros", "sleeper", "espn", "ffc", "yahoo")
+                               if k in src and src[k].get(f)), None)
+        pos = _ff_pos(pick("pos"))
+        if pos not in wanted:
+            continue
+        name = pick("name") or m["key"]
+        if pos == "DEF":
+            name = f"{_ff_team(pick('team'))} D/ST"
+        if q and q not in name.lower():
+            continue
+
+        ranks = m["ranks"]
+        if len(ranks) < max(1, min_sources):
+            continue
+        vals = list(ranks.values())
+        consensus = sum(vals) / len(vals)
+        fp = src.get("fantasypros") or {}
+        adps = list(m["adp"].values())
+
+        rows.append({
+            "key": m["key"], "name": name, "pos": pos, "team": _ff_team(pick("team")),
+            "bye": pick("bye"), "inj": (src.get("sleeper") or {}).get("inj"),
+            "ranks": {k: round(v, 1) for k, v in ranks.items()},
+            "adp": m["adp"],
+            "consensus": round(consensus, 2),
+            "n_sources": len(vals),
+            "high": round(min(vals), 1), "low": round(max(vals), 1),
+            "spread": round(max(vals) - min(vals), 1),
+            "tier": int(fp["tier"]) if fp.get("tier") is not None else None,
+            "ecr_std": fp.get("std"),
+            "proj": (src.get("sleeper") or {}).get("proj"),
+            "adp_avg": round(sum(adps) / len(adps), 1) if adps else None,
+            "adp_best": round(min(adps), 1) if adps else None,
+        })
+
+    rows.sort(key=lambda r: r["consensus"])
+    pos_seen = {}
+    for i, r in enumerate(rows, 1):
+        r["ovr_rank"] = i
+        pos_seen[r["pos"]] = pos_seen.get(r["pos"], 0) + 1
+        r["pos_rank"] = pos_seen[r["pos"]]
+        r["pos_label"] = f"{r['pos']}{r['pos_rank']}"
+        # Positive = the market is letting him fall past where the board has him.
+        r["value"] = round(r["adp_avg"] - i, 1) if r["adp_avg"] is not None else None
+
+    return {
+        "season": _FF_SEASON_HINT[0],
+        "scoring": "ppr",
+        "position": position,
+        "sources": src_meta,
+        "total": len(rows),
+        "players": rows[:max(1, min(limit, 400))],
+    }
