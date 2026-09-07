@@ -2966,7 +2966,7 @@ export default function App() {
       </div>
 
       {/* Tab switcher */}
-      <div style={{ display: 'flex', borderRadius: 10, overflowX: 'auto', overflowY: 'hidden', border: '1px solid #1e293b', marginBottom: 20, background: '#1e293b' }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', borderRadius: 10, overflow: 'hidden', border: '1px solid #1e293b', marginBottom: 20, background: '#1e293b', gap: 1 }}>
         {[
           { id: 'research', label: '🔍 Research' },
           { id: 'sim',      label: '⚾ Sim' },
@@ -2977,7 +2977,7 @@ export default function App() {
           { id: 'ff',       label: '🏈 FF' },
         ].map(t => (
           <button key={t.id} onClick={() => setTab(t.id)} style={{
-            flex: '1 0 auto', padding: '11px 12px', border: 'none', fontSize: 12, fontWeight: 600, whiteSpace: 'nowrap',
+            flex: '1 0 24%', padding: '10px 4px', border: 'none', fontSize: 12, fontWeight: 600, whiteSpace: 'nowrap',
             background: tab === t.id ? '#2563eb' : 'transparent',
             color: tab === t.id ? '#fff' : '#64748b',
             cursor: 'pointer', transition: 'background 0.15s',
