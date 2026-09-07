@@ -2717,6 +2717,25 @@ const ffInjColor = (s) => {
 }
 const ffInj = (s) => !s ? '' : /doubt/i.test(s) ? 'D' : /quest/i.test(s) ? 'Q' : s.slice(0, 3).toUpperCase()
 
+// Final keepers, 12 teams x 3. Keyed by the board's player key.
+const FF_KEEPERS = {
+  T1: ['ashton jeanty', 'amonra st brown', 'jonathan taylor'],   // Ashton Jeanty, Amon-Ra St. Brown, Jonathan Taylor
+  T2: ['bo nix', 'aj brown', 'chase brown'],   // Bo Nix, A.J. Brown, Chase Brown
+  T3: ['jayden daniels', 'kyren williams', 'quinshon judkins'],   // Jayden Daniels, Kyren Williams, Quinshon Judkins
+  T4: ['alec pierce', 'harold fannin', 'jacory croskeymerritt'],   // Alec Pierce, Harold Fannin Jr., Jacory Croskey-Merritt
+  T5: ['josh allen', 'ceedee lamb', 'devon achane'],   // Josh Allen, CeeDee Lamb, De'Von Achane
+  T6: ['chris olave', 'christian mccaffrey', 'saquon barkley'],   // Chris Olave, Christian McCaffrey, Saquon Barkley
+  T7: ['jamarr chase', 'david montgomery', 'terry mclaurin'],   // Ja'Marr Chase, David Montgomery, Terry McLaurin
+  T8: ['puka nacua', 'nico collins', 'brock bowers'],   // Puka Nacua, Nico Collins, Brock Bowers
+  T9: ['jaxon smithnjigba', 'omarion hampton', 'bijan robinson'],   // Jaxon Smith-Njigba, Omarion Hampton, Bijan Robinson
+  T10: ['kenneth walker', 'jahmyr gibbs', 'trey mcbride'],   // Kenneth Walker III, Jahmyr Gibbs, Trey McBride
+  T11: ['devonta smith', 'zay flowers', 'james cook'],   // DeVonta Smith, Zay Flowers, James Cook III
+  T12: ['lamar jackson', 'derrick henry', 'justin jefferson'],   // Lamar Jackson, Derrick Henry, Justin Jefferson
+}
+const FF_KEEPER_OWNER = Object.fromEntries(
+  Object.entries(FF_KEEPERS).flatMap(([t, ks]) => ks.map(k => [k, t])))
+const FF_KEEPER_COUNT = Object.keys(FF_KEEPER_OWNER).length
+
 // Each draft gets its own board, keyed by ?draft=<name> in the URL so two tabs
 // (or two people) never share a tracker. Storage stays per-browser.
 const ffSlotFromUrl = () => {
@@ -2739,6 +2758,7 @@ function FantasyTab() {
   const [error, setError] = useState('')
   const [openKey, setOpenKey] = useState(null)
   const [hideDrafted, setHideDrafted] = useState(true)
+  const [hideKeepers, setHideKeepers] = useState(() => ffLoad(`ff_hidekeepers:${ffSlotFromUrl()}`, false))
   // Draft night survives a refresh, and each slot is tracked separately.
   const [slot, setSlot] = useState(ffSlotFromUrl)
   const [slots, setSlots] = useState(() => {
@@ -2749,6 +2769,7 @@ function FantasyTab() {
   const [drafted, setDrafted] = useState(() => ffLoad(ffSlotKey(ffSlotFromUrl()), []))
 
   useEffect(() => { ffSave('ff_slots', slots) }, [slots])
+  useEffect(() => { ffSave(`ff_hidekeepers:${slot}`, hideKeepers) }, [slot, hideKeepers])
   // slot and drafted always change together, so this never writes one board's
   // picks into another's key.
   useEffect(() => { ffSave(ffSlotKey(slot), drafted) }, [slot, drafted])
@@ -2767,6 +2788,7 @@ function FantasyTab() {
     if (!next || next === slot) return
     setSlot(next)
     setDrafted(ffLoad(ffSlotKey(next), []))
+    setHideKeepers(ffLoad(`ff_hidekeepers:${next}`, false))
     setSlots(s => s.includes(next) ? s : [...s, next])
     try {
       const u = new URL(window.location.href)
@@ -2805,7 +2827,10 @@ function FantasyTab() {
     sort === 'value' ? (b.value ?? -999) - (a.value ?? -999)
       : sort === 'spread' ? b.spread - a.spread
       : a.consensus - b.consensus)
-  const rows = hideDrafted ? sorted.filter(p => !drafted.includes(p.key)) : sorted
+  const rows = sorted
+    .filter(p => !(hideDrafted && drafted.includes(p.key)))
+    .filter(p => !(hideKeepers && FF_KEEPER_OWNER[p.key]))
+  const keepersOnBoard = all.filter(p => FF_KEEPER_OWNER[p.key]).length
   const maxSpread = Math.max(20, ...all.map(p => p.spread || 0))
   const okSources = (data?.sources || []).filter(s => s.ok)
 
@@ -2881,6 +2906,12 @@ function FantasyTab() {
           <input type="checkbox" checked={hideDrafted} onChange={e => setHideDrafted(e.target.checked)} />
           Hide drafted ({drafted.length})
         </label>
+        <button onClick={() => setHideKeepers(v => !v)} title={`${FF_KEEPER_COUNT} keepers across 12 teams`} style={{
+          padding: '4px 10px', borderRadius: 999, fontSize: 11, fontWeight: 600, cursor: 'pointer',
+          border: `1px solid ${hideKeepers ? '#a855f7' : '#334155'}`,
+          background: hideKeepers ? 'rgba(168,85,247,0.15)' : 'transparent',
+          color: hideKeepers ? '#a855f7' : '#64748b',
+        }}>{hideKeepers ? `Keepers hidden (${keepersOnBoard})` : `Hide keepers (${keepersOnBoard})`}</button>
         {drafted.length > 0 && (
           <button onClick={() => setDrafted([])} style={{
             marginLeft: 'auto', background: 'none', border: 'none', color: '#64748b',
@@ -2939,6 +2970,12 @@ function FantasyTab() {
                   <span>· {p.team}</span>
                   {p.bye && <span>· bye {p.bye}</span>}
                   {p.tier != null && <span style={{ color: '#475569' }}>· T{p.tier}</span>}
+                  {FF_KEEPER_OWNER[p.key] && (
+                    <span style={{
+                      color: '#a855f7', fontWeight: 700, border: '1px solid rgba(168,85,247,0.4)',
+                      borderRadius: 4, padding: '0 3px', fontSize: 9,
+                    }}>K {FF_KEEPER_OWNER[p.key]}</span>
+                  )}
                   {/* disagreement bar */}
                   <span style={{ flex: 1, height: 3, background: '#0f172a', borderRadius: 2, marginLeft: 2, maxWidth: 46 }}>
                     <span style={{
