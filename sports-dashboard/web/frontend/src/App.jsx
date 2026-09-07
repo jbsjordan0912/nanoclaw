@@ -2717,6 +2717,19 @@ const ffInjColor = (s) => {
 }
 const ffInj = (s) => !s ? '' : /doubt/i.test(s) ? 'D' : /quest/i.test(s) ? 'Q' : s.slice(0, 3).toUpperCase()
 
+// Each draft gets its own board, keyed by ?draft=<name> in the URL so two tabs
+// (or two people) never share a tracker. Storage stays per-browser.
+const ffSlotFromUrl = () => {
+  try { return new URLSearchParams(window.location.search).get('draft') || 'main' }
+  catch { return 'main' }
+}
+const ffSlotKey = (slot) => `ff_drafted:${slot}`
+const ffLoad = (k, fallback) => {
+  try { const v = localStorage.getItem(k); return v == null ? fallback : JSON.parse(v) }
+  catch { return fallback }
+}
+const ffSave = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)) } catch { /* private mode */ } }
+
 function FantasyTab() {
   const [position, setPosition] = useState('ALL')
   const [sort, setSort] = useState('consensus')
@@ -2726,14 +2739,47 @@ function FantasyTab() {
   const [error, setError] = useState('')
   const [openKey, setOpenKey] = useState(null)
   const [hideDrafted, setHideDrafted] = useState(true)
-  // Draft night survives a refresh.
-  const [drafted, setDrafted] = useState(() => {
-    try { return JSON.parse(localStorage.getItem('ff_drafted') || '[]') } catch { return [] }
+  // Draft night survives a refresh, and each slot is tracked separately.
+  const [slot, setSlot] = useState(ffSlotFromUrl)
+  const [slots, setSlots] = useState(() => {
+    const known = ffLoad('ff_slots', ['main'])
+    const cur = ffSlotFromUrl()
+    return known.includes(cur) ? known : [...known, cur]
   })
+  const [drafted, setDrafted] = useState(() => ffLoad(ffSlotKey(ffSlotFromUrl()), []))
 
+  useEffect(() => { ffSave('ff_slots', slots) }, [slots])
+  // slot and drafted always change together, so this never writes one board's
+  // picks into another's key.
+  useEffect(() => { ffSave(ffSlotKey(slot), drafted) }, [slot, drafted])
+
+  // If the same slot is open in another tab, converge instead of clobbering.
   useEffect(() => {
-    try { localStorage.setItem('ff_drafted', JSON.stringify(drafted)) } catch { /* private mode */ }
-  }, [drafted])
+    const onStorage = (e) => {
+      if (e.key !== ffSlotKey(slot)) return
+      try { setDrafted(JSON.parse(e.newValue || '[]')) } catch { /* ignore */ }
+    }
+    window.addEventListener('storage', onStorage)
+    return () => window.removeEventListener('storage', onStorage)
+  }, [slot])
+
+  const switchSlot = (next) => {
+    if (!next || next === slot) return
+    setSlot(next)
+    setDrafted(ffLoad(ffSlotKey(next), []))
+    setSlots(s => s.includes(next) ? s : [...s, next])
+    try {
+      const u = new URL(window.location.href)
+      u.searchParams.set('draft', next)
+      window.history.replaceState({}, '', u)
+    } catch { /* ignore */ }
+  }
+
+  const newSlot = () => {
+    const name = (window.prompt('Name this draft (e.g. work, dynasty):') || '').trim()
+      .toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '')
+    if (name) switchSlot(name)
+  }
 
   const load = useCallback(async () => {
     setLoading(true); setError('')
@@ -2810,6 +2856,23 @@ function FantasyTab() {
           ))}
         </div>
         <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search…" style={ctlStyle} />
+      </div>
+
+      {/* Draft slots — one board per draft */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 8, flexWrap: 'wrap' }}>
+        <span style={{ fontSize: 10, color: '#475569', textTransform: 'uppercase', letterSpacing: '0.05em', marginRight: 2 }}>Draft</span>
+        {slots.map(s => (
+          <button key={s} onClick={() => switchSlot(s)} style={{
+            padding: '4px 9px', borderRadius: 999, fontSize: 11, fontWeight: 600, cursor: 'pointer',
+            border: `1px solid ${s === slot ? '#22c55e' : '#334155'}`,
+            background: s === slot ? 'rgba(34,197,94,0.15)' : 'transparent',
+            color: s === slot ? '#22c55e' : '#64748b',
+          }}>{s}</button>
+        ))}
+        <button onClick={newSlot} title="New draft board" style={{
+          padding: '4px 9px', borderRadius: 999, fontSize: 11, fontWeight: 700, cursor: 'pointer',
+          border: '1px dashed #334155', background: 'transparent', color: '#64748b',
+        }}>+</button>
       </div>
 
       {/* Draft tracker */}
@@ -2945,6 +3008,8 @@ function FantasyTab() {
         <div style={{ fontSize: 10, color: '#475569', marginTop: 8, lineHeight: 1.5 }}>
           Cons = mean rank across sources. Val = avg ADP minus board rank; positive means he's
           lasting past where the experts have him. The amber bar flags where the sources disagree most.
+          <br />Running two drafts at once? Open each in its own tab and pick a different Draft chip —
+          the URL (?draft={slot}) keeps them separate.
         </div>
       )}
     </div>
