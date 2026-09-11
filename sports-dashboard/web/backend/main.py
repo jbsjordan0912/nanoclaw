@@ -2095,6 +2095,320 @@ async def cfb_positions(req: CfbPositionsRequest):
 
 
 # ---------------------------------------------------------------------------
+# College football: live game state (ESPN) + multi-market sweeps
+# ---------------------------------------------------------------------------
+
+ESPN_CFB_API = "https://site.api.espn.com/apis/site/v2/sports/football/college-football"
+CFB_DEFAULT_ESPN_EVENT = "401859184"   # Rice @ Notre Dame, 2026-09-12
+_CFB_STATE_TTL = 4.0
+_cfb_state_cache = {}      # espn event id -> {"at": float, "data": dict}
+
+
+def _cfb_int(v) -> int:
+    try:
+        return int(float(v))
+    except (TypeError, ValueError):
+        return 0
+
+
+@app.get("/api/cfb/state")
+async def cfb_state(event: str = CFB_DEFAULT_ESPN_EVENT):
+    """Live score, clock, per-quarter points and TD counts from ESPN's public feed."""
+    if not event.isdigit():
+        return {"error": "bad event id"}
+    cached = _cfb_state_cache.get(event)
+    if cached and time.time() - cached["at"] < _CFB_STATE_TTL:
+        return cached["data"]
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(f"{ESPN_CFB_API}/summary", params={"event": event})
+            r.raise_for_status()
+            summary = r.json()
+            comp = summary["header"]["competitions"][0]
+            # The scoreboard carries the live clock, down & distance and
+            # possession; the summary carries the scoring plays. ESPN files
+            # games under their US-Eastern date.
+            kick = datetime.fromisoformat(comp["date"].replace("Z", "+00:00"))
+            day = (kick - timedelta(hours=5)).strftime("%Y%m%d")
+            sb = await client.get(
+                f"{ESPN_CFB_API}/scoreboard",
+                params={"dates": day, "groups": 80, "limit": 300},
+            )
+            ev = None
+            if sb.status_code == 200:
+                ev = next((e for e in sb.json().get("events", []) if e.get("id") == event), None)
+    except Exception as e:
+        if cached:
+            return {**cached["data"], "stale": True}
+        return {"error": str(e)}
+
+    live = ev["competitions"][0] if ev else comp
+    status = live.get("status") or comp.get("status") or {}
+    stype = status.get("type") or {}
+
+    id_abbr, teams = {}, []
+    for c in live.get("competitors", []):
+        t = c.get("team") or {}
+        abbr = (t.get("abbreviation") or "").upper()
+        id_abbr[str(t.get("id") or c.get("id"))] = abbr
+        teams.append({
+            "abbr": abbr,
+            "name": t.get("location") or t.get("shortDisplayName") or abbr,
+            "home_away": c.get("homeAway"),
+            "score": _cfb_int(c.get("score")),
+            "lines": [_cfb_int(l.get("value", l.get("displayValue"))) for l in c.get("linescores") or []],
+        })
+    teams.sort(key=lambda t: t["home_away"] != "away")   # away first, like a scorebug
+
+    # Kalshi's TD markets count every touchdown (offense, defense, special teams).
+    tds = {t["abbr"]: 0 for t in teams}
+    first_td, last = None, None
+    for p in summary.get("scoringPlays") or []:
+        team = p.get("team") or {}
+        abbr = (team.get("abbreviation") or id_abbr.get(str(team.get("id")), "")).upper()
+        if "touchdown" in ((p.get("type") or {}).get("text") or "").lower():
+            tds[abbr] = tds.get(abbr, 0) + 1
+            first_td = first_td or abbr
+        last = {
+            "team": abbr,
+            "text": p.get("text") or (p.get("type") or {}).get("text"),
+            "period": (p.get("period") or {}).get("number"),
+            "clock": (p.get("clock") or {}).get("displayValue"),
+        }
+
+    sit = live.get("situation") if ev else None
+    situation = None
+    if sit and stype.get("state") == "in":
+        situation = {
+            "down_distance": sit.get("downDistanceText") or sit.get("shortDownDistanceText"),
+            "possession": id_abbr.get(str(sit.get("possession"))),
+            "red_zone": bool(sit.get("isRedZone")),
+        }
+
+    data = {
+        "event": event,
+        "state": stype.get("state"),          # pre | in | post
+        "status": stype.get("name"),          # STATUS_IN_PROGRESS, STATUS_HALFTIME, ...
+        "detail": stype.get("shortDetail") or stype.get("detail"),
+        "period": _cfb_int(status.get("period")),
+        "clock": status.get("displayClock"),
+        "teams": teams,
+        "tds": tds,
+        "first_td": first_td,
+        "last_score": last,
+        "situation": situation,
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _cfb_state_cache[event] = {"at": time.time(), "data": data}
+    return data
+
+
+# A sweep buys one side of many markets at once: the cheapest asks across all of
+# them first, each at or under one max price, until the budget runs out. Every
+# order is immediate-or-cancel, so nothing rests on the book afterwards.
+_CFB_SWEEP_MAX_LEGS = 60
+_CFB_SWEEP_MAX_BUDGET_CENTS = 100_000   # $1,000 per sweep: a guard against typos
+_CFB_TICKER_RE = re.compile(r"^[A-Z0-9][A-Z0-9.\-]{2,80}$")
+_cfb_book_cache = {}       # ticker -> {"at": float, "book": dict}
+
+
+class CfbSweepLeg(BaseModel):
+    ticker: str
+    side: str                # "yes" | "no"
+
+
+class CfbSweepRequest(BaseModel):
+    legs: list[CfbSweepLeg]
+    max_price_cents: int
+    budget_cents: int
+    trade_token: str = ""
+
+
+def _kalshi_fee_cents(count: int, price_cents: int) -> int:
+    """Kalshi taker fee: 7% x contracts x P x (1 - P), rounded up to the cent."""
+    import math
+    p = price_cents / 100
+    return math.ceil(count * 0.07 * p * (1 - p) * 100 - 1e-9)
+
+
+def _book_asks(book: dict, side: str) -> list:
+    """(price_cents, size) asks for buying `side`, cheapest first. A YES ask is a
+    NO bid seen from the other side (100 - price), and vice versa."""
+    raw = book.get("no_dollars" if side == "yes" else "yes_dollars") or []
+    return sorted((100 - round(float(p) * 100), int(float(s))) for p, s in raw)
+
+
+async def _cfb_books(tickers: list, max_age: float) -> dict:
+    """Order books by ticker; max_age=0 always refetches."""
+    import httpx
+    out, need, now = {}, [], time.time()
+    for t in tickers:
+        c = _cfb_book_cache.get(t)
+        if c and now - c["at"] < max_age:
+            out[t] = c["book"]
+        else:
+            need.append(t)
+    if need:
+        sem = asyncio.Semaphore(6)
+        async with httpx.AsyncClient(timeout=8.0, headers={"accept": "application/json"}) as client:
+            async def one(t: str):
+                async with sem:
+                    r = await _cfb_get(client, f"{KALSHI_API_BASE}/markets/{t}/orderbook")
+                if r.status_code == 200:
+                    body = r.json()
+                    book = body.get("orderbook_fp", body.get("orderbook", {})) or {}
+                    _cfb_book_cache[t] = {"at": time.time(), "book": book}
+                    out[t] = book
+            await asyncio.gather(*(one(t) for t in need))
+    return out
+
+
+def _cfb_sweep_error(req: CfbSweepRequest) -> Optional[str]:
+    if not req.legs:
+        return "no markets selected"
+    if len(req.legs) > _CFB_SWEEP_MAX_LEGS:
+        return f"at most {_CFB_SWEEP_MAX_LEGS} markets per sweep"
+    if not 1 <= req.max_price_cents <= 99:
+        return "max price must be 1-99¢"
+    if not 0 < req.budget_cents <= _CFB_SWEEP_MAX_BUDGET_CENTS:
+        return f"budget must be between $0 and ${_CFB_SWEEP_MAX_BUDGET_CENTS // 100}"
+    seen = set()
+    for leg in req.legs:
+        if leg.side not in ("yes", "no") or not _CFB_TICKER_RE.match(leg.ticker):
+            return f"bad market {leg.ticker}:{leg.side}"
+        if leg.ticker in seen:
+            return f"{leg.ticker} is in the sweep twice"
+        seen.add(leg.ticker)
+    return None
+
+
+def _cfb_plan(req: CfbSweepRequest, books: dict) -> dict:
+    """Spend the budget on the cheapest asks across every leg, up to the max price."""
+    ladder = []
+    for i, leg in enumerate(req.legs):
+        for price, size in _book_asks(books.get(leg.ticker) or {}, leg.side):
+            if price > req.max_price_cents:
+                break
+            if price > 0 and size > 0:
+                ladder.append((price, i, size))
+    ladder.sort()
+    left = req.budget_cents
+    legs = [{"ticker": l.ticker, "side": l.side, "fills": [], "contracts": 0, "cost_cents": 0}
+            for l in req.legs]
+    for price, i, size in ladder:
+        n = min(size, left // price)
+        if n <= 0:
+            break           # sorted by price, so nothing later is affordable either
+        leg = legs[i]
+        leg["fills"].append({"price": price, "contracts": n})
+        leg["contracts"] += n
+        leg["cost_cents"] += n * price
+        left -= n * price
+    legs = [l for l in legs if l["contracts"]]
+    contracts = sum(l["contracts"] for l in legs)
+    cost = sum(l["cost_cents"] for l in legs)
+    fee = sum(_kalshi_fee_cents(f["contracts"], f["price"]) for l in legs for f in l["fills"])
+    return {
+        "legs": legs,
+        "missing_books": [l.ticker for l in req.legs if l.ticker not in books],
+        "total_contracts": contracts,
+        "total_cost_cents": cost,
+        "fee_cents": fee,
+        "payout_cents": contracts * 100,
+        "budget_left_cents": left,
+    }
+
+
+async def _kalshi_ioc_buy(client, ticker: str, side: str, price_cents: int, count: int) -> dict:
+    """One immediate-or-cancel buy of `side` at up to price_cents. V2 orders are
+    YES-leg only: a NO buy at N¢ is an ask at (100 - N)¢ (see trade_execute)."""
+    path = "/trade-api/v2/portfolio/events/orders"
+    result = {"price": price_cents, "contracts": count, "filled": 0}
+    auth = _kalshi_auth_headers("POST", path)
+    if not auth:
+        return {**result, "ok": False, "error": "Kalshi auth not configured"}
+    yes_price = price_cents if side == "yes" else 100 - price_cents
+    body = {
+        "ticker": ticker,
+        "side": "bid" if side == "yes" else "ask",
+        "count": f"{count:.2f}",
+        "price": f"{yes_price / 100:.4f}",
+        "time_in_force": "immediate_or_cancel",
+        "self_trade_prevention_type": "taker_at_cross",
+        "client_order_id": str(uuid.uuid4()),
+    }
+    try:
+        r = await client.post(
+            f"{KALSHI_API_BASE}/portfolio/events/orders",
+            headers={**auth, "accept": "application/json", "content-type": "application/json"},
+            json=body,
+        )
+    except Exception as e:
+        return {**result, "ok": False, "error": str(e)}
+    if r.status_code not in (200, 201):
+        return {**result, "ok": False, "error": r.text, "status_code": r.status_code}
+    return {**result, "ok": True, "filled": _cfb_int(r.json().get("fill_count"))}
+
+
+@app.post("/api/cfb/sweep/preview")
+async def cfb_sweep_preview(req: CfbSweepRequest):
+    """What a sweep would buy right now, from the live books."""
+    err = _cfb_sweep_error(req)
+    if err:
+        return {"error": err}
+    books = await _cfb_books([l.ticker for l in req.legs], max_age=2.0)
+    return _cfb_plan(req, books)
+
+
+@app.post("/api/cfb/sweep/execute")
+async def cfb_sweep_execute(req: CfbSweepRequest):
+    """Re-plan from fresh books, then send the IOC orders (legs in parallel)."""
+    if not _verify_trade_token(req.trade_token):
+        return {"ok": False, "error": "Unauthorized"}
+    err = _cfb_sweep_error(req)
+    if err:
+        return {"ok": False, "error": err}
+    books = await _cfb_books([l.ticker for l in req.legs], max_age=0)   # never trade off a cached book
+    plan = _cfb_plan(req, books)
+    if not plan["legs"]:
+        return {"ok": False, "error": "Nothing fills at these prices", "plan": plan}
+
+    import httpx
+    sem = asyncio.Semaphore(4)
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        async def run_leg(leg: dict) -> dict:
+            orders = []
+            async with sem:
+                for f in leg["fills"]:
+                    orders.append(await _kalshi_ioc_buy(client, leg["ticker"], leg["side"], f["price"], f["contracts"]))
+            return {
+                "ticker": leg["ticker"], "side": leg["side"], "planned": leg["contracts"],
+                "filled": sum(o["filled"] for o in orders),
+                # Upper bound: an IOC can fill below its limit, never above.
+                "cost_cents": sum(o["price"] * o["filled"] for o in orders),
+                "orders": orders,
+            }
+        results = await asyncio.gather(*(run_leg(l) for l in plan["legs"]))
+
+    orders = [o for r in results for o in r["orders"]]
+    filled = sum(r["filled"] for r in results)
+    return {
+        "ok": filled > 0,
+        "legs": results,
+        "summary": {
+            "filled": filled,
+            "planned": plan["total_contracts"],
+            "cost_cents": sum(r["cost_cents"] for r in results),
+            "legs_filled": sum(1 for r in results if r["filled"]),
+            "orders": len(orders),
+            "failed": sum(1 for o in orders if not o["ok"]),
+            "errors": [o["error"][:200] for o in orders if not o["ok"]][:3],
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
 # NFL Mock Draft Consensus
 # ---------------------------------------------------------------------------
 

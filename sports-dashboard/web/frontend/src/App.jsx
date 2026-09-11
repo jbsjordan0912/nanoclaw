@@ -2703,10 +2703,17 @@ function HRScannerTab() {
 
 // ── College football game board (every Kalshi market for one game) ───────────
 const CFB_GAME = '26SEP12RICEND'   // Rice @ Notre Dame, Sat 9/12
+const CFB_ESPN_EVENT = '401859184' // the same game on ESPN's scoreboard
+const CFB_TEAMS = ['RICE', 'ND']    // away, home: Kalshi's ticker codes, which match ESPN's
 const CFB_SPEND_CHIPS = [10, 25, 50, 100]
+const CFB_SWEEP_BUDGETS = [25, 50, 100, 250]
 const CFB_BUMPS = [[0, 'Ask'], [1, '+1'], [3, '+3'], [5, '+5']]
 const CFB_DEFAULT_OPEN = new Set(['KXNCAAFGAME', 'KXNCAAFSPREAD', 'KXNCAAFTOTAL', 'KXNCAAFTEAMTOTAL', 'KXNCAAFTEAMTD', 'KXNCAAFFIRSTTDTEAM'])
 const CFB_SIDE_COLOR = { yes: '#22c55e', no: '#ef4444' }
+// A lock read off the ESPN feed must hold this long before a sweep will use it,
+// so a scoring play that's overturned on review never reaches an order.
+const CFB_LOCK_SETTLE_MS = 45000
+const CFB_END_OF_PERIOD = new Set(['STATUS_END_PERIOD', 'STATUS_HALFTIME'])
 
 // Kalshi taker fee: 7% × contracts × P × (1 − P), rounded up to the cent
 const kalshiFeeCents = (contracts, priceCents) => {
@@ -2740,6 +2747,74 @@ function cfbSweep(asks, takePrice, budgetCents) {
     left -= n * l.price
   }
   return { contracts, cost, fee }
+}
+
+// Game state the lock rules read: ESPN's feed, or hand-entered scores when the
+// feed lags. Manual mode only knows the two totals, so only full-game lines use it.
+function cfbGameState(espn, manual) {
+  if (manual) return { manual: true, state: 'in', period: 0, status: '', scores: { ...manual }, lines: {}, tds: {}, firstTd: null }
+  if (!espn?.teams?.length) return null
+  return {
+    manual: false, state: espn.state, period: espn.period, status: espn.status,
+    scores: Object.fromEntries(espn.teams.map(t => [t.abbr, t.score])),
+    lines: Object.fromEntries(espn.teams.map(t => [t.abbr, t.lines])),
+    tds: espn.tds || {}, firstTd: espn.first_td,
+  }
+}
+
+// Which side of each market the score has already decided -> { ticker: 'yes'|'no' }.
+// Per Kalshi's market rules: halves and quarters count only their own points,
+// the 4th quarter excludes OT, full-game lines include it, and every TD counts.
+function cfbLocks(groups, gs) {
+  const locks = {}
+  if (!gs || gs.state === 'pre') return locks
+  const final = gs.state === 'post'
+  const periodDone = (n) => final || gs.period > n || (gs.period === n && CFB_END_OF_PERIOD.has(gs.status))
+  const teams = Object.keys(gs.scores)
+  const pts = (team, periods) => periods
+    ? periods.reduce((s, p) => s + (gs.lines[team]?.[p - 1] || 0), 0)
+    : gs.scores[team] || 0
+  for (const g of groups) {
+    const kind = g.series.replace(/^KXNCAAF/, '')
+    const q = kind.match(/^([1-4])Q/)
+    const periods = kind.startsWith('1H') ? [1, 2] : q ? [Number(q[1])] : null
+    const done = periods ? periodDone(periods[periods.length - 1]) : final
+    const base = kind.replace(/^(1H|[1-4]Q)/, '') || 'GAME'   // bare "1Q" / "1H" is a winner market
+    for (const m of g.markets) {
+      const suffix = m.ticker.split('-').pop()
+      const team = suffix.replace(/\d+$/, '')
+      const other = teams.find(t => t !== team)
+      const known = teams.includes(team)
+      let lock = null
+      if (base === 'TOTAL') {
+        const total = teams.reduce((s, t) => s + pts(t, periods), 0)
+        if (total > m.strike) lock = 'yes'
+        else if (done) lock = 'no'
+      } else if (base === 'TEAMTOTAL' && known) {
+        if (pts(team, periods) > m.strike) lock = 'yes'
+        else if (done) lock = 'no'
+      } else if (base === 'SPREAD' && known) {
+        if (done) lock = pts(team, periods) - pts(other, periods) > m.strike ? 'yes' : 'no'
+      } else if (base === 'GAME') {
+        if (done) {
+          const [a, b] = teams
+          const pa = pts(a, periods), pb = pts(b, periods)
+          lock = suffix === (pa === pb ? 'TIE' : pa > pb ? a : b) ? 'yes' : 'no'
+        }
+      } else if (base === 'TEAMTD' && known) {
+        if ((gs.tds[team] || 0) > m.strike) lock = 'yes'
+        else if (final) lock = 'no'
+      } else if (base === 'FIRSTTDTEAM') {
+        if (gs.firstTd) lock = suffix === gs.firstTd ? 'yes' : 'no'
+        else if (final) lock = suffix === 'NONE' ? 'yes' : 'no'
+      } else if (base === 'OT') {
+        if (gs.period >= 5) lock = 'yes'
+        else if (final) lock = 'no'
+      }
+      if (lock) locks[m.ticker] = lock
+    }
+  }
+  return locks
 }
 
 function SlideToConfirm({ label, busy, disabled, onConfirm, color }) {
@@ -2845,7 +2920,56 @@ function TradeUnlockModal({ onUnlocked, onClose }) {
   )
 }
 
-function CFBMarketRow({ m, sel, isLine, onPick }) {
+function CFBScorebug({ espn, espnErr, manual, setManual }) {
+  const teams = espn?.teams?.length ? espn.teams : CFB_TEAMS.map(abbr => ({ abbr, name: abbr, score: 0 }))
+  const sit = espn?.situation
+  return (
+    <div style={{
+      background: '#1e293b', borderRadius: 12, padding: 12, marginBottom: 10,
+      border: `1px solid ${manual ? '#f59e0b55' : '#334155'}`,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+        <div style={{ flex: 1 }}>
+          {teams.map(t => (
+            <div key={t.abbr} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
+              <span style={{ width: 8, fontSize: 8, color: '#f59e0b' }}>{!manual && sit?.possession === t.abbr ? '●' : ''}</span>
+              <span style={{ flex: 1, fontSize: 14, fontWeight: 700, color: '#e2e8f0' }}>{t.name}</span>
+              {manual
+                ? <input type="number" inputMode="numeric" value={manual[t.abbr] ?? 0}
+                    onChange={e => setManual({ ...manual, [t.abbr]: Number(e.target.value) || 0 })}
+                    style={{ width: 56, padding: '2px 6px', borderRadius: 6, background: '#0f172a', border: '1px solid #f59e0b', color: '#f1f5f9', fontSize: 18, fontWeight: 800, textAlign: 'right', outline: 'none' }} />
+                : <span style={{ fontSize: 20, fontWeight: 900, color: '#f1f5f9', minWidth: 30, textAlign: 'right' }}>{t.score}</span>}
+            </div>
+          ))}
+        </div>
+        <div style={{ textAlign: 'right', maxWidth: 150 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: manual ? '#f59e0b' : espn?.state === 'in' ? '#22c55e' : '#94a3b8' }}>
+            {manual ? 'MANUAL' : espn?.detail || (espnErr ? 'ESPN feed down' : '—')}
+          </div>
+          {!manual && sit?.down_distance && (
+            <div style={{ fontSize: 11, color: sit.red_zone ? '#ef4444' : '#94a3b8' }}>{sit.down_distance}</div>
+          )}
+          <div onClick={() => setManual(manual ? null : Object.fromEntries(teams.map(t => [t.abbr, t.score || 0])))}
+            style={{ fontSize: 11, color: '#3b82f6', cursor: 'pointer', marginTop: 4 }}>
+            {manual ? 'use ESPN' : '✎ manual'}
+          </div>
+        </div>
+      </div>
+      {!manual && espn?.last_score && (
+        <div style={{ fontSize: 10, color: '#475569', marginTop: 6 }}>
+          Last score: {espn.last_score.team} · {espn.last_score.text} (Q{espn.last_score.period} {espn.last_score.clock})
+        </div>
+      )}
+      {manual && (
+        <div style={{ fontSize: 10, color: '#f59e0b', marginTop: 6 }}>
+          Manual scores drive full-game locks and the spread sweep only.
+        </div>
+      )}
+    </div>
+  )
+}
+
+function CFBMarketRow({ m, sel, isLine, lock, onPick }) {
   const btn = (side) => {
     const ask = side === 'yes' ? m.yes_ask : m.no_ask
     const active = sel?.ticker === m.ticker && sel?.side === side
@@ -2869,7 +2993,15 @@ function CFBMarketRow({ m, sel, isLine, onPick }) {
       borderTop: '1px solid #0f172a', borderLeft: `2px solid ${isLine ? '#f59e0b' : 'transparent'}`,
     }}>
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontSize: 13, color: '#e2e8f0', lineHeight: 1.25 }}>{m.label}</div>
+        <div style={{ fontSize: 13, color: '#e2e8f0', lineHeight: 1.25 }}>
+          {m.label}
+          {lock && (
+            <span title={lock.pending ? 'Settling: waiting out a possible review' : 'Decided by the score'} style={{
+              marginLeft: 6, fontSize: 10, fontWeight: 800,
+              color: lock.pending ? '#f59e0b' : CFB_SIDE_COLOR[lock.side],
+            }}>{lock.pending ? '⏳' : '🔒'} {lock.side.toUpperCase()}</span>
+          )}
+        </div>
         <div style={{ fontSize: 10, color: '#475569' }}>
           {spread != null ? `spread ${spread}¢` : 'one-sided'} · vol {m.volume.toLocaleString()}
           {m.pos ? (
@@ -2881,6 +3013,135 @@ function CFBMarketRow({ m, sel, isLine, onPick }) {
       </div>
       {btn('yes')}
       {btn('no')}
+    </div>
+  )
+}
+
+const cfbChip = (active, color = '#f59e0b') => ({
+  flex: 1, padding: '6px 0', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer',
+  border: `1px solid ${active ? color : '#334155'}`,
+  background: active ? `${color}22` : '#0f172a', color: active ? color : '#94a3b8',
+})
+const cfbStepBtn = {
+  width: 40, height: 40, borderRadius: 10, border: '1px solid #334155', background: '#0f172a',
+  color: '#e2e8f0', fontSize: 20, fontWeight: 700, cursor: 'pointer',
+}
+
+function CFBSweepPanel({ sweep, setSweep, gs, legs, plan, max, setMax, budget, setBudget, token, busy, result, onUnlock, onExecute, onClose, onDismiss }) {
+  const amber = '#f59e0b'
+  const planned = Object.fromEntries((plan?.legs || []).map(l => [`${l.ticker}:${l.side}`, l]))
+  const teams = gs ? Object.keys(gs.scores) : CFB_TEAMS
+  const other = teams.find(t => t !== sweep.team)
+  const margin = gs ? (gs.scores[sweep.team] || 0) - (gs.scores[other] || 0) : 0
+  const cost = plan?.total_cost_cents || 0, fee = plan?.fee_cents || 0, payout = plan?.payout_cents || 0
+  const nFill = plan?.legs?.length || 0
+  return (
+    <div style={{ position: 'fixed', left: 0, right: 0, bottom: 0, zIndex: 50, display: 'flex', justifyContent: 'center', pointerEvents: 'none' }}>
+      <div style={{
+        width: '100%', maxWidth: 480, pointerEvents: 'auto', background: '#1e293b',
+        borderTop: `2px solid ${amber}`, borderRadius: '14px 14px 0 0',
+        padding: '12px 16px calc(12px + env(safe-area-inset-bottom))', boxShadow: '0 -8px 24px rgba(0,0,0,0.5)',
+      }}>
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: 8 }}>
+          <span style={{ fontSize: 11, fontWeight: 800, color: '#000', background: amber, borderRadius: 4, padding: '2px 6px' }}>SWEEP</span>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: '#e2e8f0' }}>{sweep.title}</div>
+            <div style={{ fontSize: 10, color: '#475569' }}>{legs.length} markets with asks ≤{max}¢ · cheapest asks fill first</div>
+          </div>
+          <span onClick={onClose} style={{ fontSize: 18, color: '#475569', cursor: 'pointer', lineHeight: 1 }}>×</span>
+        </div>
+
+        {sweep.kind === 'spread' && (
+          <div style={{ marginBottom: 8 }}>
+            <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginBottom: 6 }}>
+              {teams.map(t => (
+                <button key={t} style={cfbChip(sweep.team === t)} onClick={() => setSweep({ ...sweep, team: t })}>{t}</button>
+              ))}
+              <span style={{ flex: 1.4, fontSize: 12, color: margin > 0 ? '#22c55e' : '#94a3b8', textAlign: 'right' }}>
+                {sweep.team} {margin >= 0 ? '+' : ''}{margin}
+              </span>
+            </div>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 12, color: '#94a3b8' }}>
+              <span>cushion ≥</span>
+              <button style={{ ...cfbStepBtn, width: 32, height: 32, fontSize: 16 }} onClick={() => setSweep({ ...sweep, cushion: Math.max(1, sweep.cushion - 1) })}>−</button>
+              <b style={{ color: '#e2e8f0', minWidth: 44, textAlign: 'center' }}>{sweep.cushion} pts</b>
+              <button style={{ ...cfbStepBtn, width: 32, height: 32, fontSize: 16 }} onClick={() => setSweep({ ...sweep, cushion: sweep.cushion + 1 })}>+</button>
+              <label style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer' }}>
+                <input type="checkbox" checked={sweep.withNo} onChange={e => setSweep({ ...sweep, withNo: e.target.checked })} />
+                NO on {other}
+              </label>
+            </div>
+          </div>
+        )}
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
+          <button style={cfbStepBtn} onClick={() => setMax(v => Math.max(1, v - 1))}>−</button>
+          <div style={{ flex: 1, textAlign: 'center' }}>
+            <div style={{ fontSize: 9, color: '#475569' }}>MAX PRICE (EVERY MARKET)</div>
+            <div style={{ fontSize: 26, fontWeight: 900, color: amber, lineHeight: 1 }}>{max}¢</div>
+          </div>
+          <button style={cfbStepBtn} onClick={() => setMax(v => Math.min(99, v + 1))}>+</button>
+        </div>
+        <input type="range" min={1} max={99} value={max} onChange={e => setMax(Number(e.target.value))}
+          style={{ width: '100%', accentColor: amber, margin: '2px 0 8px' }} />
+
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginBottom: 8 }}>
+          {CFB_SWEEP_BUDGETS.map(v => (
+            <button key={v} style={cfbChip(budget === v)} onClick={() => setBudget(v)}>${v}</button>
+          ))}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+            <span style={{ fontSize: 12, color: '#94a3b8' }}>$</span>
+            <input value={budget} onChange={e => setBudget(Number(e.target.value) || 0)} type="number" inputMode="decimal"
+              style={{ width: 56, padding: '5px 6px', borderRadius: 8, background: '#0f172a', border: '1px solid #334155', color: '#f1f5f9', fontSize: 13, outline: 'none' }} />
+          </div>
+        </div>
+
+        <div style={{ maxHeight: 112, overflowY: 'auto', marginBottom: 8, borderTop: '1px solid #0f172a' }}>
+          {legs.length === 0 && <div style={{ fontSize: 12, color: '#475569', padding: '6px 0' }}>No markets qualify right now.</div>}
+          {legs.map(l => {
+            const p = planned[`${l.ticker}:${l.side}`]
+            return (
+              <div key={l.ticker} style={{ display: 'flex', gap: 6, fontSize: 11, padding: '3px 0', color: '#94a3b8' }}>
+                <span style={{ color: CFB_SIDE_COLOR[l.side], fontWeight: 800, width: 26 }}>{l.side.toUpperCase()}</span>
+                <span style={{ flex: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: '#e2e8f0' }}>{l.label}</span>
+                <span>{l.ask}¢</span>
+                <span style={{ width: 70, textAlign: 'right', color: p ? '#e2e8f0' : '#334155' }}>
+                  {p ? `${p.contracts} @ ${(p.cost_cents / p.contracts).toFixed(1)}` : '—'}
+                </span>
+              </div>
+            )
+          })}
+        </div>
+
+        <div style={{ fontSize: 12, color: '#94a3b8', marginBottom: 10, minHeight: 16 }}>
+          {plan?.error ? <span style={{ color: '#ef4444' }}>{plan.error}</span>
+            : !plan ? (legs.length ? 'Pricing...' : '')
+            : plan.total_contracts === 0 ? <span style={{ color: '#475569' }}>Nothing fills at ≤{max}¢</span>
+            : <>≈ <b style={{ color: '#e2e8f0' }}>{plan.total_contracts}</b> in {nFill} mkts · ${(cost / 100).toFixed(2)} + ~${(fee / 100).toFixed(2)} fee · pays ${(payout / 100).toFixed(2)} · <b style={{ color: '#22c55e' }}>+${((payout - cost - fee) / 100).toFixed(2)}</b> if all win</>}
+        </div>
+
+        {token
+          ? <SlideToConfirm color={amber} busy={busy} disabled={!plan?.total_contracts}
+              label={`SLIDE TO SWEEP ${nFill} MARKETS →`} onConfirm={onExecute} />
+          : <button onClick={onUnlock} style={{
+              width: '100%', height: 48, borderRadius: 24, border: '1px solid #f59e0b55',
+              background: '#0f172a', color: amber, fontSize: 13, fontWeight: 700, cursor: 'pointer',
+            }}>Unlock trading</button>}
+
+        {result && (
+          <div style={{ marginTop: 8, fontSize: 12 }}>
+            {result.ok
+              ? <span style={{ color: '#22c55e', fontWeight: 700 }}>
+                  Filled {result.summary.filled}/{result.summary.planned} across {result.summary.legs_filled} markets · ≤${(result.summary.cost_cents / 100).toFixed(2)}
+                </span>
+              : <span style={{ color: '#ef4444', wordBreak: 'break-word' }}>Not filled: {result.error || result.summary?.errors?.[0] || 'nothing at that price'}</span>}
+            {result.ok && result.summary.failed > 0 && (
+              <div style={{ color: '#ef4444', wordBreak: 'break-word' }}>{result.summary.failed} orders failed: {result.summary.errors[0]}</div>
+            )}
+            <span onClick={onDismiss} style={{ marginLeft: 8, color: '#475569', cursor: 'pointer' }}>dismiss</span>
+          </div>
+        )}
+      </div>
     </div>
   )
 }
@@ -2899,6 +3160,15 @@ function CFBTab() {
   const [showPin, setShowPin] = useState(false)
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState(null)
+  const [espn, setEspn] = useState(null)      // /api/cfb/state
+  const [espnErr, setEspnErr] = useState('')
+  const [manual, setManual] = useState(null)  // { RICE: 0, ND: 27 } while overriding ESPN
+  const [sweep, setSweep] = useState(null)    // { kind: 'locks'|'spread', series, title, team, cushion, withNo }
+  const [sweepMax, setSweepMax] = useState(97)
+  const [sweepBudget, setSweepBudget] = useState(50)
+  const [sweepPlan, setSweepPlan] = useState(null)
+  const [sweepResult, setSweepResult] = useState(null)
+  const lockSeen = useRef({})                 // "ticker|side" -> when that lock first appeared
 
   // Snapshot every 30s picks up new/closed markets; the socket carries prices between.
   useEffect(() => {
@@ -2929,6 +3199,21 @@ function CFBTab() {
     }
     connect()
     return () => { alive = false; clearTimeout(timer); ws?.close() }
+  }, [])
+
+  // Live score from ESPN
+  useEffect(() => {
+    let alive = true
+    const load = () => fetch(`${API}/api/cfb/state?event=${CFB_ESPN_EVENT}`)
+      .then(r => r.json())
+      .then(d => {
+        if (!alive) return
+        if (d.teams) { setEspn(d); setEspnErr('') } else setEspnErr(d.error || 'no data')
+      })
+      .catch(e => alive && setEspnErr(e.message))
+    load()
+    const t = setInterval(load, 5000)
+    return () => { alive = false; clearInterval(t) }
   }, [])
 
   // My positions on this game (account data, so it needs the trade token)
@@ -2975,19 +3260,90 @@ function CFBTab() {
     return () => clearInterval(t)
   }, [selTicker, fetchOb])
 
+  const groups = snap ? snap.groups.map(g => ({ ...g, markets: g.markets.map(withLive) })) : []
+  const gs = cfbGameState(espn, manual)
+  const locks = cfbLocks(groups, gs)
+
+  // Feed locks settle for CFB_LOCK_SETTLE_MS before sweeps use them; hand-entered
+  // scores are trusted at once. A lock that disappears (score reversed) resets.
+  const now = Date.now()
+  for (const k of Object.keys(lockSeen.current)) {
+    const [t, side] = k.split('|')
+    if (locks[t] !== side) delete lockSeen.current[k]
+  }
+  const lockInfo = {}
+  for (const [t, side] of Object.entries(locks)) {
+    const k = `${t}|${side}`
+    if (!lockSeen.current[k]) lockSeen.current[k] = now
+    lockInfo[t] = { side, pending: !gs.manual && now - lockSeen.current[k] < CFB_LOCK_SETTLE_MS }
+  }
+
+  const askFor = (m, side) => (side === 'yes' ? m.yes_ask : m.no_ask)
+  const lockLegs = (series) => groups
+    .filter(g => !series || g.series === series)
+    .flatMap(g => g.markets.filter(m => {
+      const l = lockInfo[m.ticker]
+      return l && !l.pending && askFor(m, l.side) != null
+    }).map(m => {
+      const side = lockInfo[m.ticker].side
+      return { ticker: m.ticker, side, label: m.label, ask: askFor(m, side) }
+    }))
+  const allLockLegs = lockLegs(null)
+  const teamsNow = gs ? Object.keys(gs.scores) : CFB_TEAMS
+  const leader = gs ? [...teamsNow].sort((a, b) => (gs.scores[b] || 0) - (gs.scores[a] || 0))[0] : CFB_TEAMS[1]
+
+  let sweepLegs = []
+  if (sweep?.kind === 'locks') {
+    sweepLegs = lockLegs(sweep.series).filter(l => l.ask <= sweepMax)
+  } else if (sweep?.kind === 'spread' && gs) {
+    // YES on our team's lines the margin already clears by `cushion`, plus NO on
+    // the other side's lines (they'd need to come back margin + line points).
+    const other = teamsNow.find(t => t !== sweep.team)
+    const margin = (gs.scores[sweep.team] || 0) - (gs.scores[other] || 0)
+    for (const m of groups.find(g => g.series === sweep.series)?.markets || []) {
+      const team = m.ticker.split('-').pop().replace(/\d+$/, '')
+      const side = team === sweep.team ? 'yes' : sweep.withNo ? 'no' : null
+      if (!side || m.strike == null) continue
+      const cushion = team === sweep.team ? margin - m.strike : margin + m.strike
+      const ask = askFor(m, side)
+      if (cushion >= sweep.cushion && ask != null && ask <= sweepMax) sweepLegs.push({ ticker: m.ticker, side, label: m.label, ask })
+    }
+  }
+
+  const legKey = sweepLegs.map(l => `${l.ticker}:${l.side}`).join(',')
+  useEffect(() => {
+    if (!legKey) { setSweepPlan(null); return }
+    let alive = true
+    const legs = legKey.split(',').map(k => { const [ticker, side] = k.split(':'); return { ticker, side } })
+    const load = () => fetch(`${API}/api/cfb/sweep/preview`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ legs, max_price_cents: sweepMax, budget_cents: Math.round(sweepBudget * 100) }),
+    }).then(r => r.json()).then(d => { if (alive) setSweepPlan(d) }).catch(() => {})
+    const first = setTimeout(load, 300)
+    const t = setInterval(load, 4000)
+    return () => { alive = false; clearTimeout(first); clearInterval(t) }
+  }, [legKey, sweepMax, sweepBudget])
+
   const pick = (m, side, group) => {
     if (sel?.ticker === m.ticker && sel?.side === side) { setSel(null); return }
     const ask = side === 'yes' ? m.yes_ask : m.no_ask
+    setSweep(null)
     setSel({ ticker: m.ticker, side, label: m.label, group })
     setTake(ask ?? 50)
     setResult(null)
   }
 
+  const openSweep = (cfg) => {
+    setSel(null)
+    setSweepResult(null)
+    setSweepPlan(null)
+    setSweep(cfg)
+  }
+
   const lock = () => { localStorage.removeItem('pitchpulse_token'); setToken('') }
 
   const ladder = sideLadder(ob, sel?.side)
-  const selMarket = sel && snap?.groups.flatMap(g => g.markets).find(m => m.ticker === sel.ticker)
-  const liveSel = selMarket ? withLive(selMarket) : null
+  const liveSel = sel && groups.flatMap(g => g.markets).find(m => m.ticker === sel.ticker)
   const bestAsk = ladder.asks[0]?.price ?? (liveSel ? (sel.side === 'yes' ? liveSel.yes_ask : liveSel.no_ask) : null)
   const plan = cfbSweep(ladder.asks, take, Math.round(spend * 100))
   const depth = ladder.asks.filter(l => l.price <= take).reduce((s, l) => s + l.size, 0)
@@ -3018,17 +3374,33 @@ function CFBTab() {
     }
   }
 
+  const executeSweep = async () => {
+    if (!token || !sweepLegs.length) return
+    setBusy(true)
+    setSweepResult(null)
+    try {
+      const r = await fetch(`${API}/api/cfb/sweep/execute`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          legs: sweepLegs.map(({ ticker, side }) => ({ ticker, side })),
+          max_price_cents: sweepMax, budget_cents: Math.round(sweepBudget * 100), trade_token: token,
+        }),
+      })
+      const d = await r.json()
+      setSweepResult(d)
+      if (d?.error === 'Unauthorized') { lock(); setShowPin(true) }
+    } catch (e) {
+      setSweepResult({ ok: false, error: e.message })
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const expanded = (s) => open[s] ?? CFB_DEFAULT_OPEN.has(s)
   const setAll = (v) => setOpen(Object.fromEntries((snap?.groups || []).map(g => [g.series, v])))
-  const chip = (activeNow) => ({
-    flex: 1, padding: '6px 0', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer',
-    border: `1px solid ${activeNow ? sideColor : '#334155'}`,
-    background: activeNow ? `${sideColor}22` : '#0f172a', color: activeNow ? sideColor : '#94a3b8',
-  })
-  const stepBtn = {
-    width: 40, height: 40, borderRadius: 10, border: '1px solid #334155', background: '#0f172a',
-    color: '#e2e8f0', fontSize: 20, fontWeight: 700, cursor: 'pointer',
-  }
+  const chip = (activeNow) => cfbChip(activeNow, sideColor)
+  const nLocked = Object.keys(lockInfo).length
+  const nPending = Object.values(lockInfo).filter(l => l.pending).length
 
   return (
     <div style={{ animation: 'fadeIn 0.3s ease' }}>
@@ -3050,6 +3422,23 @@ function CFBTab() {
         </div>
       </div>
 
+      <CFBScorebug espn={espn} espnErr={espnErr} manual={manual} setManual={setManual} />
+
+      {snap && gs && gs.state !== 'pre' && (
+        <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+          <button disabled={!allLockLegs.length} onClick={() => openSweep({ kind: 'locks', series: null, title: 'Every locked market' })} style={{
+            ...cfbChip(allLockLegs.length > 0), flex: 1, padding: '9px 0', opacity: allLockLegs.length ? 1 : 0.5,
+          }}>🔒 Sweep locks ({allLockLegs.length})</button>
+          <button onClick={() => openSweep({ kind: 'spread', series: 'KXNCAAFSPREAD', title: 'Covered spread lines', team: leader, cushion: 9, withNo: true })}
+            style={{ ...cfbChip(false), flex: 1, padding: '9px 0' }}>⚡ Sweep spread</button>
+        </div>
+      )}
+      {nLocked > 0 && (
+        <div style={{ fontSize: 10, color: '#475569', marginBottom: 8 }}>
+          {nLocked} markets decided{nPending ? ` · ${nPending} ⏳ settling (45s review buffer)` : ''}
+        </div>
+      )}
+
       {err && !snap && <div style={{ fontSize: 13, color: '#ef4444', textAlign: 'center', padding: 20 }}>{err}</div>}
       {!snap && !err && <div style={{ fontSize: 13, color: '#475569', textAlign: 'center', padding: 40 }}>Loading Kalshi markets...</div>}
 
@@ -3060,9 +3449,10 @@ function CFBTab() {
         </div>
       )}
 
-      {snap?.groups.map(g => {
+      {groups.map(g => {
         const isOpen = expanded(g.series)
-        const markets = g.markets.map(withLive)
+        const markets = g.markets
+        const groupLocks = lockLegs(g.series).length
         // Flag the market priced closest to a coin flip — the de facto line on a ladder
         let lineIdx = -1
         if (markets.length > 3) {
@@ -3077,15 +3467,19 @@ function CFBTab() {
           <div key={g.series} style={{ background: '#1e293b', borderRadius: 12, marginBottom: 8, border: '1px solid #334155', overflow: 'hidden' }}>
             <div onClick={() => setOpen(o => ({ ...o, [g.series]: !isOpen }))} style={{
               display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-              padding: '10px 12px', cursor: 'pointer',
+              padding: '10px 12px', cursor: 'pointer', gap: 8,
             }}>
-              <span style={{ fontSize: 13, fontWeight: 700, color: '#e2e8f0' }}>{g.title}</span>
+              <span style={{ flex: 1, fontSize: 13, fontWeight: 700, color: '#e2e8f0' }}>{g.title}</span>
+              {groupLocks > 0 && (
+                <span onClick={(e) => { e.stopPropagation(); openSweep({ kind: 'locks', series: g.series, title: `Locked · ${g.title}` }) }}
+                  style={{ fontSize: 11, fontWeight: 700, color: '#f59e0b', cursor: 'pointer' }}>🔒 sweep {groupLocks}</span>
+              )}
               <span style={{ fontSize: 11, color: '#475569' }}>{markets.length} {isOpen ? '▼' : '▶'}</span>
             </div>
             {isOpen && (
               <div style={{ padding: '0 10px 6px 4px' }}>
                 {markets.map((m, i) => (
-                  <CFBMarketRow key={m.ticker} m={m} sel={sel} isLine={i === lineIdx}
+                  <CFBMarketRow key={m.ticker} m={m} sel={sel} isLine={i === lineIdx} lock={lockInfo[m.ticker]}
                     onPick={(mk, side) => pick(mk, side, g.title)} />
                 ))}
               </div>
@@ -3094,8 +3488,15 @@ function CFBTab() {
         )
       })}
 
-      {/* Room so the fixed ticket never covers the last rows */}
-      {sel && <div style={{ height: 340 }} />}
+      {/* Room so the fixed ticket / sweep panel never covers the last rows */}
+      {(sel || sweep) && <div style={{ height: sweep ? 480 : 340 }} />}
+
+      {sweep && (
+        <CFBSweepPanel sweep={sweep} setSweep={setSweep} gs={gs} legs={sweepLegs} plan={sweepPlan}
+          max={sweepMax} setMax={setSweepMax} budget={sweepBudget} setBudget={setSweepBudget}
+          token={token} busy={busy} result={sweepResult} onUnlock={() => setShowPin(true)}
+          onExecute={executeSweep} onClose={() => setSweep(null)} onDismiss={() => setSweepResult(null)} />
+      )}
 
       {sel && (
         <div style={{ position: 'fixed', left: 0, right: 0, bottom: 0, zIndex: 50, display: 'flex', justifyContent: 'center', pointerEvents: 'none' }}>
@@ -3119,7 +3520,7 @@ function CFBTab() {
 
             {/* Take price */}
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 }}>
-              <button style={stepBtn} onClick={() => setTake(t => Math.max(1, t - 1))}>−</button>
+              <button style={cfbStepBtn} onClick={() => setTake(t => Math.max(1, t - 1))}>−</button>
               <div style={{ flex: 1, textAlign: 'center' }}>
                 <div style={{ fontSize: 9, color: '#475569' }}>MAX PRICE</div>
                 <div style={{ fontSize: 28, fontWeight: 900, color: sideColor, lineHeight: 1 }}>{take}¢</div>
@@ -3127,7 +3528,7 @@ function CFBTab() {
                   {bestAsk == null ? 'no ask' : over === 0 ? 'at best ask' : over > 0 ? `${over}¢ over ask (${bestAsk}¢)` : `${-over}¢ under ask (${bestAsk}¢)`}
                 </div>
               </div>
-              <button style={stepBtn} onClick={() => setTake(t => Math.min(99, t + 1))}>+</button>
+              <button style={cfbStepBtn} onClick={() => setTake(t => Math.min(99, t + 1))}>+</button>
             </div>
             <input type="range" min={1} max={99} value={take} onChange={e => setTake(Number(e.target.value))}
               style={{ width: '100%', accentColor: sideColor, margin: '2px 0 8px' }} />
