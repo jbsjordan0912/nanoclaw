@@ -1187,12 +1187,13 @@ async def trade_preview(req: SweepPreviewRequest):
                 ]
                 levels.sort(key=lambda x: x["price"])  # cheapest first
             else:
+                # For buying NO: asks come from yes_dollars (NO ask = 100 - YES bid)
                 raw_bids = ob.get("yes_dollars", [])
                 levels = [
-                    {"price": round(float(p) * 100), "size": int(float(s))}
+                    {"price": 100 - round(float(p) * 100), "size": int(float(s))}
                     for p, s in raw_bids
                 ]
-                levels.sort(key=lambda x: x["price"], reverse=True)  # best price first
+                levels.sort(key=lambda x: x["price"])  # cheapest first
 
             # Sweep: buy from best ask up to max_price, within budget
             fills = []
@@ -1201,9 +1202,7 @@ async def trade_preview(req: SweepPreviewRequest):
             remaining_budget = req.max_spend_cents
 
             for level in levels:
-                if req.side == "yes" and level["price"] > req.max_price_cents:
-                    break
-                if req.side == "no" and level["price"] < req.max_price_cents:
+                if level["price"] > req.max_price_cents:
                     break
 
                 # How many can we afford at this level?
@@ -1268,10 +1267,12 @@ async def trade_execute(req: SweepExecuteRequest):
     if not fills:
         return {"error": "No contracts available at these prices", "ok": False}
 
-    # UI only ever buys YES. The V2 schema's `side` is YES-leg only (bid=buy YES,
-    # ask=sell YES), so don't guess a NO mapping — fail loudly instead.
-    if req.side != "yes":
-        return {"error": f"Only YES buys are supported (got side={req.side})", "ok": False}
+    # The V2 schema's `side` is YES-leg only (bid = buy YES, ask = sell YES).
+    # Kalshi's order-direction guide: "buy-no and sell-yes both produce long no",
+    # so a NO buy at N¢ goes out as an ask on the YES leg at (100 - N)¢.
+    if req.side not in ("yes", "no"):
+        return {"error": f"side must be yes or no (got {req.side})", "ok": False}
+    book_side = "bid" if req.side == "yes" else "ask"
 
     # Kalshi retired POST /portfolio/orders (HTTP 410 deprecated_v1_order_endpoint).
     # Orders now go to /portfolio/events/orders with dollar-string price + count.
@@ -1289,11 +1290,12 @@ async def trade_execute(req: SweepExecuteRequest):
                 auth["accept"] = "application/json"
                 auth["content-type"] = "application/json"
 
+                yes_price = fill["price"] if req.side == "yes" else 100 - fill["price"]
                 order_body = {
                     "ticker": req.ticker,
-                    "side": "bid",  # buy YES
+                    "side": book_side,
                     "count": f"{fill['contracts']:.2f}",
-                    "price": f"{fill['price'] / 100:.4f}",
+                    "price": f"{yes_price / 100:.4f}",
                     "time_in_force": "immediate_or_cancel",
                     "self_trade_prevention_type": "taker_at_cross",
                     "client_order_id": str(uuid.uuid4()),
@@ -1465,13 +1467,15 @@ async def kalshi_game_tickers(home_team: str = "", away_team: str = ""):
 # ---------------------------------------------------------------------------
 
 @app.websocket("/api/ws/kalshi")
-async def kalshi_ws_proxy(websocket: WebSocket, ticker: str = "", game_key: str = ""):
+async def kalshi_ws_proxy(websocket: WebSocket, ticker: str = "", game_key: str = "", cfb_game: str = ""):
     """Subscribe to both sides of a Kalshi game and stream price updates.
 
     Pass either:
       - ticker: a single market ticker (subscribes to that one)
       - game_key: the game event ticker (e.g. KXMLBGAME-26MAR261615TBSTL)
         → auto-finds both team tickers and subscribes to both
+      - cfb_game: a college football game code (e.g. 26SEP12RICEND)
+        → subscribes to every open market in /api/cfb/markets for that game
     """
     await websocket.accept()
 
@@ -1496,6 +1500,17 @@ async def kalshi_ws_proxy(websocket: WebSocket, ticker: str = "", game_key: str 
                             team = t.split("-")[-1]
                             tickers.append(t)
                             ticker_team_map[t] = team
+    elif cfb_game:
+        cfb_game = cfb_game.upper()
+        if _CFB_GAME_RE.match(cfb_game):
+            try:
+                snap = await _cfb_snapshot(cfb_game)
+            except Exception:
+                snap = {}
+            for g in snap.get("groups", []):
+                for m in g["markets"]:
+                    tickers.append(m["ticker"])
+                    ticker_team_map[m["ticker"]] = m["ticker"]
     elif ticker:
         tickers = [ticker]
         ticker_team_map[ticker] = ticker.split("-")[-1]
@@ -1831,6 +1846,252 @@ async def hr_cancel_game(game_key: str):
             return {"ok": True, "cancelled": cancelled, "total_found": len(game_orders)}
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# College football game board: every Kalshi market for one game
+# ---------------------------------------------------------------------------
+
+# Kalshi spreads one CFB game over ~20 series (moneyline, spread, totals,
+# half/quarter lines, first TD, ...) whose event tickers share a suffix:
+# KXNCAAFSPREAD-26SEP12RICEND, KXNCAAF1QTOTAL-26SEP12RICEND, ... There's no
+# "every event for this game" endpoint and /markets ignores comma-separated
+# event_tickers, so we probe each NCAAF series once (cached) to learn which
+# carry the game, then re-read only those events for each snapshot. Prices
+# between snapshots stream over /api/ws/kalshi?cfb_game=...
+CFB_DEFAULT_GAME = "26SEP12RICEND"   # Rice @ Notre Dame, 2026-09-12
+_CFB_GAME_RE = re.compile(r"^[0-9A-Z]{6,30}$")
+_CFB_SERIES_TTL = 900.0
+_CFB_SNAPSHOT_TTL = 10.0
+_cfb_series_cache = {}     # game -> {"at": float, "series": {series_ticker: title}}
+_cfb_snapshot_cache = {}   # game -> {"at": float, "data": dict}
+_cfb_lock = asyncio.Lock()
+
+# Display order by series suffix (after "KXNCAAF"); unknown series sort last.
+_CFB_GROUP_ORDER = [
+    "GAME", "SPREAD", "TOTAL", "TEAMTOTAL", "TEAMTD", "FIRSTTDTEAM", "FTTS", "OT",
+    "1H", "1HWINNER", "1HSPREAD", "1HTOTAL", "1HTEAMTOTAL", "1HFT",
+    "2H", "2HSPREAD", "2HTOTAL",
+    "1Q", "1QSPREAD", "1QTOTAL", "1QBTTS", "2Q", "2QSPREAD", "2QTOTAL", "2QBTTS",
+    "3Q", "3QSPREAD", "3QTOTAL", "3QBTTS", "4Q", "4QSPREAD", "4QTOTAL", "4QBTTS",
+]
+
+
+async def _cfb_get(client, url: str, params: Optional[dict] = None):
+    """GET with a short back-off on Kalshi's 429s (public reads are rate limited)."""
+    for attempt in range(4):
+        r = await client.get(url, params=params)
+        if r.status_code != 429:
+            return r
+        await asyncio.sleep(0.5 * (attempt + 1))
+    return r
+
+
+async def _cfb_find_series(client, game: str) -> dict:
+    """Which NCAAF series have an event for this game -> {series_ticker: title}."""
+    cached = _cfb_series_cache.get(game)
+    if cached and time.time() - cached["at"] < _CFB_SERIES_TTL:
+        return cached["series"]
+    r = await _cfb_get(client, f"{KALSHI_API_BASE}/series", {"category": "Sports"})
+    r.raise_for_status()
+    candidates = {
+        s["ticker"]: s.get("title") or s["ticker"]
+        for s in r.json().get("series", [])
+        if s.get("ticker", "").startswith(("KXNCAAF", "KXCFB"))
+    }
+    found, unsure = {}, 0
+    sem = asyncio.Semaphore(6)
+
+    async def probe(series: str):
+        nonlocal unsure
+        async with sem:
+            rr = await _cfb_get(client, f"{KALSHI_API_BASE}/events/{series}-{game}")
+        if rr.status_code == 200:
+            found[series] = candidates[series]
+        elif rr.status_code != 404:
+            unsure += 1
+
+    await asyncio.gather(*(probe(s) for s in candidates))
+    if found:
+        # A probe that never got a real answer may have hidden a series:
+        # retry discovery in a minute instead of pinning it for 15.
+        at = time.time() - (_CFB_SERIES_TTL - 60 if unsure else 0)
+        _cfb_series_cache[game] = {"at": at, "series": found}
+    return found
+
+
+def _cfb_market(m: dict) -> dict:
+    """Normalize one Kalshi market to whole-cent prices for both sides."""
+    yb = _parse_dollars(m.get("yes_bid_dollars"))
+    ya = _parse_dollars(m.get("yes_ask_dollars"))
+    # Kalshi reports an empty side as bid 0 / ask 1.00.
+    yes_bid = round(yb * 100) if yb > 0 else None
+    yes_ask = round(ya * 100) if 0 < ya < 1 else None
+
+    def _size(key):
+        try:
+            return int(float(m.get(key) or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    last = round(_parse_dollars(m.get("last_price_dollars")) * 100)
+    return {
+        "ticker": m.get("ticker"),
+        "label": m.get("yes_sub_title") or m.get("title") or m.get("ticker"),
+        "yes_bid": yes_bid,
+        "yes_ask": yes_ask,
+        # Buying NO lifts a YES bid; selling NO hits a YES ask.
+        "no_bid": 100 - yes_ask if yes_ask is not None else None,
+        "no_ask": 100 - yes_bid if yes_bid is not None else None,
+        "yes_bid_size": _size("yes_bid_size_fp"),
+        "yes_ask_size": _size("yes_ask_size_fp"),
+        "last": last or None,
+        "volume": _parse_volume(m),
+        "strike": m.get("floor_strike"),
+        "status": m.get("status"),
+    }
+
+
+def _cfb_market_sort_key(m: dict):
+    # Ladders sort by team (ND34 -> "ND") then line, so each side reads in order.
+    suffix = (m["ticker"] or "").rsplit("-", 1)[-1]
+    return (re.sub(r"\d+$", "", suffix), m["strike"] or 0, m["ticker"])
+
+
+async def _cfb_snapshot(game: str) -> dict:
+    async with _cfb_lock:
+        cached = _cfb_snapshot_cache.get(game)
+        if cached and time.time() - cached["at"] < _CFB_SNAPSHOT_TTL:
+            return cached["data"]
+        import httpx
+        async with httpx.AsyncClient(timeout=15.0, headers={"accept": "application/json"}) as client:
+            series = await _cfb_find_series(client, game)
+            sem = asyncio.Semaphore(6)
+
+            async def load(s: str):
+                async with sem:
+                    r = await _cfb_get(
+                        client, f"{KALSHI_API_BASE}/events/{s}-{game}",
+                        {"with_nested_markets": "true"},
+                    )
+                if r.status_code != 200:
+                    return s, None, []
+                body = r.json()
+                ev = body.get("event") or {}
+                return s, ev, body.get("markets") or ev.get("markets") or []
+
+            results = await asyncio.gather(*(load(s) for s in series))
+
+        # A failed event read keeps its previous group rather than vanishing.
+        prev = {g["series"]: g for g in (cached["data"]["groups"] if cached else [])}
+        title, groups = None, []
+        for s, ev, markets in results:
+            if ev is None:
+                if s in prev:
+                    groups.append(prev[s])
+                continue
+            if s == "KXNCAAFGAME" or title is None:
+                title = (ev.get("title") or "").split(":")[0] or title
+            live = [_cfb_market(m) for m in markets if m.get("status") in ("active", "open")]
+            if not live:
+                continue
+            live.sort(key=_cfb_market_sort_key)
+            short = s[len("KXNCAAF"):] if s.startswith("KXNCAAF") else s
+            name = "Moneyline" if short == "GAME" else re.sub(r"^College Football\s+", "", series[s])
+            groups.append({"series": s, "event_ticker": f"{s}-{game}", "title": name, "markets": live})
+
+        def rank(g):
+            short = g["series"][len("KXNCAAF"):]
+            return _CFB_GROUP_ORDER.index(short) if short in _CFB_GROUP_ORDER else len(_CFB_GROUP_ORDER)
+
+        groups.sort(key=lambda g: (rank(g), g["title"]))
+        data = {
+            "game": game,
+            "title": title or game,
+            "groups": groups,
+            "market_count": sum(len(g["markets"]) for g in groups),
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
+        }
+        _cfb_snapshot_cache[game] = {"at": time.time(), "data": data}
+        return data
+
+
+@app.on_event("startup")
+async def _cfb_warm():
+    """Series discovery takes a few seconds; do it before the first page load."""
+    async def go():
+        try:
+            await _cfb_snapshot(CFB_DEFAULT_GAME)
+        except Exception:
+            pass
+    asyncio.create_task(go())
+
+
+@app.get("/api/cfb/markets")
+async def cfb_markets(game: str = CFB_DEFAULT_GAME):
+    """Every open Kalshi market for one CFB game, grouped by market type."""
+    game = game.upper()
+    if not _CFB_GAME_RE.match(game):
+        return {"error": "bad game code", "groups": []}
+    try:
+        return await _cfb_snapshot(game)
+    except Exception as e:
+        return {"error": str(e), "groups": []}
+
+
+class CfbPositionsRequest(BaseModel):
+    trade_token: str
+    game: str = CFB_DEFAULT_GAME
+
+
+@app.post("/api/cfb/positions")
+async def cfb_positions(req: CfbPositionsRequest):
+    """Your Kalshi positions on this game's markets: ticker -> signed count
+    (positive = YES, negative = NO). Gated by the trade token — account data."""
+    if not _verify_trade_token(req.trade_token):
+        return {"ok": False, "error": "Unauthorized"}
+    game = req.game.upper()
+    if not _CFB_GAME_RE.match(game):
+        return {"ok": False, "error": "bad game code"}
+    import httpx
+    path = "/trade-api/v2/portfolio/positions"
+    out, cursor = {}, None
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            for _ in range(10):
+                auth = _kalshi_auth_headers("GET", path)
+                if not auth:
+                    return {"ok": False, "error": "Kalshi auth not configured"}
+                params = {"limit": 1000, "count_filter": "position"}
+                if cursor:
+                    params["cursor"] = cursor
+                r = await client.get(
+                    f"{KALSHI_API_BASE}/portfolio/positions",
+                    headers={**auth, "accept": "application/json"}, params=params,
+                )
+                if r.status_code != 200:
+                    return {"ok": False, "error": r.text, "status_code": r.status_code}
+                body = r.json()
+                for p in body.get("market_positions", []):
+                    t = p.get("ticker") or ""
+                    if f"-{game}-" not in t:
+                        continue
+                    try:
+                        n = int(float(p.get("position_fp") or 0))
+                    except (TypeError, ValueError):
+                        n = 0
+                    if n:
+                        out[t] = {
+                            "position": n,
+                            "exposure": _parse_dollars(p.get("market_exposure_dollars")),
+                            "realized_pnl": _parse_dollars(p.get("realized_pnl_dollars")),
+                        }
+                cursor = body.get("cursor")
+                if not cursor:
+                    break
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": True, "positions": out}
 
 
 # ---------------------------------------------------------------------------

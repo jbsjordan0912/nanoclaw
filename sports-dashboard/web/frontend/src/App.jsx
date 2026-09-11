@@ -743,11 +743,12 @@ function SpringOddsTab() {
 }
 
 // Derive WebSocket base URL from current host
-function getKalshiWsUrl({ ticker, gameKey } = {}) {
+function getKalshiWsUrl({ ticker, gameKey, cfbGame } = {}) {
   const isLocal = window.location.hostname === 'localhost'
   const base = isLocal
     ? 'ws://localhost:8000'
     : 'wss://mlb-simulator-api.onrender.com'
+  if (cfbGame) return `${base}/api/ws/kalshi?cfb_game=${encodeURIComponent(cfbGame)}`
   if (gameKey) return `${base}/api/ws/kalshi?game_key=${encodeURIComponent(gameKey)}`
   return `${base}/api/ws/kalshi?ticker=${encodeURIComponent(ticker)}`
 }
@@ -2700,6 +2701,489 @@ function HRScannerTab() {
   )
 }
 
+// ── College football game board (every Kalshi market for one game) ───────────
+const CFB_GAME = '26SEP12RICEND'   // Rice @ Notre Dame, Sat 9/12
+const CFB_SPEND_CHIPS = [10, 25, 50, 100]
+const CFB_BUMPS = [[0, 'Ask'], [1, '+1'], [3, '+3'], [5, '+5']]
+const CFB_DEFAULT_OPEN = new Set(['KXNCAAFGAME', 'KXNCAAFSPREAD', 'KXNCAAFTOTAL', 'KXNCAAFTEAMTOTAL', 'KXNCAAFTEAMTD', 'KXNCAAFFIRSTTDTEAM'])
+const CFB_SIDE_COLOR = { yes: '#22c55e', no: '#ef4444' }
+
+// Kalshi taker fee: 7% × contracts × P × (1 − P), rounded up to the cent
+const kalshiFeeCents = (contracts, priceCents) => {
+  const p = priceCents / 100
+  return Math.ceil(contracts * 0.07 * p * (1 - p) * 100 - 1e-9)
+}
+
+// The book from /api/kalshi/orderbook is YES-denominated. A NO ask is a YES
+// bid seen from the other side (100 − price), and vice versa.
+function sideLadder(ob, side) {
+  if (!ob) return { asks: [], bids: [] }
+  if (side === 'yes') return { asks: ob.asks || [], bids: ob.bids || [] }
+  const flip = (l) => ({ price: 100 - l.price, size: l.size })
+  return {
+    asks: (ob.bids || []).map(flip).sort((a, b) => a.price - b.price),
+    bids: (ob.asks || []).map(flip).sort((a, b) => b.price - a.price),
+  }
+}
+
+// Mirror of the server's sweep (/api/trade/preview): walk the ask ladder up to
+// the take price, buying whole contracts within budget.
+function cfbSweep(asks, takePrice, budgetCents) {
+  let left = budgetCents, contracts = 0, cost = 0, fee = 0
+  for (const l of asks) {
+    if (l.price > takePrice) break
+    const n = Math.min(l.size, Math.floor(left / l.price))
+    if (n <= 0) break
+    contracts += n
+    cost += n * l.price
+    fee += kalshiFeeCents(n, l.price)
+    left -= n * l.price
+  }
+  return { contracts, cost, fee }
+}
+
+function SlideToConfirm({ label, busy, disabled, onConfirm, color }) {
+  const trackRef = useRef(null)
+  const xRef = useRef(0)
+  const cbRef = useRef(onConfirm)
+  cbRef.current = onConfirm
+  const [x, setX] = useState(0)
+  const [dragging, setDragging] = useState(false)
+
+  const start = (e) => {
+    if (disabled || busy || !trackRef.current) return
+    e.preventDefault()
+    const rect = trackRef.current.getBoundingClientRect()
+    const startX = (e.touches?.[0] || e).clientX
+    setDragging(true)
+    const move = (ev) => {
+      const cx = (ev.touches?.[0] || ev).clientX
+      xRef.current = Math.max(0, Math.min(cx - startX, rect.width - 48))
+      setX(xRef.current)
+    }
+    const end = () => {
+      document.removeEventListener('mousemove', move)
+      document.removeEventListener('mouseup', end)
+      document.removeEventListener('touchmove', move)
+      document.removeEventListener('touchend', end)
+      if (xRef.current >= rect.width - 80) cbRef.current()
+      xRef.current = 0
+      setX(0)
+      setDragging(false)
+    }
+    document.addEventListener('mousemove', move)
+    document.addEventListener('mouseup', end)
+    document.addEventListener('touchmove', move, { passive: false })
+    document.addEventListener('touchend', end)
+  }
+
+  const off = disabled && !busy
+  return (
+    <div ref={trackRef} style={{
+      position: 'relative', height: 48, borderRadius: 24, background: '#0f172a',
+      border: `1px solid ${off ? '#334155' : color + '55'}`, overflow: 'hidden',
+      userSelect: 'none', WebkitUserSelect: 'none', touchAction: 'none',
+    }}>
+      <div style={{
+        position: 'absolute', left: 0, top: 0, bottom: 0, width: x + 48, borderRadius: 24,
+        background: dragging ? `linear-gradient(90deg, ${color}44, ${color}22)` : 'transparent',
+        transition: dragging ? 'none' : 'width 0.3s',
+      }} />
+      <div style={{
+        position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
+        fontSize: 12, fontWeight: 700, letterSpacing: '0.08em', pointerEvents: 'none',
+        color: off ? '#475569' : color,
+      }}>{busy ? 'EXECUTING...' : label}</div>
+      {!off && !busy && (
+        <div onMouseDown={start} onTouchStart={start} style={{
+          position: 'absolute', top: 2, left: 2 + x, width: 44, height: 44, borderRadius: 22,
+          background: color, cursor: 'grab', display: 'flex', alignItems: 'center', justifyContent: 'center',
+          fontSize: 18, color: '#000', fontWeight: 900, transition: dragging ? 'none' : 'left 0.3s',
+        }}>⟩</div>
+      )}
+    </div>
+  )
+}
+
+function TradeUnlockModal({ onUnlocked, onClose }) {
+  const [pw, setPw] = useState('')
+  const [err, setErr] = useState('')
+  const submit = async () => {
+    setErr('')
+    try {
+      const r = await fetch(`${API}/api/auth/trade`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: pw }),
+      })
+      const d = await r.json()
+      if (d.ok) {
+        localStorage.setItem('pitchpulse_token', d.token)
+        onUnlocked(d.token)
+      } else setErr(d.error || 'Wrong password')
+    } catch { setErr('Connection error') }
+  }
+  return (
+    <div onClick={onClose} style={{
+      position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', zIndex: 100,
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+    }}>
+      <div onClick={e => e.stopPropagation()} style={{ background: '#1e293b', borderRadius: 16, padding: 24, width: 280, border: '1px solid #334155' }}>
+        <div style={{ fontSize: 15, fontWeight: 700, color: '#e2e8f0', marginBottom: 16, textAlign: 'center' }}>Unlock Trading</div>
+        <input value={pw} onChange={e => setPw(e.target.value)} onKeyDown={e => e.key === 'Enter' && submit()}
+          placeholder="Enter password" type="password" autoFocus style={{
+            width: '100%', padding: '10px 12px', borderRadius: 8, background: '#0f172a',
+            border: `1px solid ${err ? '#ef4444' : '#334155'}`, color: '#f1f5f9', fontSize: 15,
+            outline: 'none', boxSizing: 'border-box', marginBottom: 8,
+          }} />
+        {err && <div style={{ fontSize: 12, color: '#ef4444', marginBottom: 8 }}>{err}</div>}
+        <button onClick={submit} style={{
+          width: '100%', padding: '10px 0', borderRadius: 8, border: 'none', background: '#2563eb',
+          color: '#fff', fontSize: 14, fontWeight: 700, cursor: 'pointer',
+        }}>Unlock</button>
+      </div>
+    </div>
+  )
+}
+
+function CFBMarketRow({ m, sel, isLine, onPick }) {
+  const btn = (side) => {
+    const ask = side === 'yes' ? m.yes_ask : m.no_ask
+    const active = sel?.ticker === m.ticker && sel?.side === side
+    const color = CFB_SIDE_COLOR[side]
+    return (
+      <button disabled={ask == null} onClick={() => onPick(m, side)} style={{
+        width: 58, padding: '5px 0', borderRadius: 8, lineHeight: 1.15,
+        border: `1px solid ${active ? color : '#334155'}`, background: active ? `${color}22` : '#0f172a',
+        color: ask == null ? '#334155' : color, fontSize: 15, fontWeight: 800,
+        cursor: ask == null ? 'default' : 'pointer',
+      }}>
+        <div style={{ fontSize: 9, fontWeight: 700, opacity: 0.7 }}>{side.toUpperCase()}</div>
+        {ask != null ? `${ask}¢` : '—'}
+      </button>
+    )
+  }
+  const spread = m.yes_ask != null && m.yes_bid != null ? m.yes_ask - m.yes_bid : null
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 6, padding: '6px 0 6px 8px',
+      borderTop: '1px solid #0f172a', borderLeft: `2px solid ${isLine ? '#f59e0b' : 'transparent'}`,
+    }}>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontSize: 13, color: '#e2e8f0', lineHeight: 1.25 }}>{m.label}</div>
+        <div style={{ fontSize: 10, color: '#475569' }}>
+          {spread != null ? `spread ${spread}¢` : 'one-sided'} · vol {m.volume.toLocaleString()}
+          {m.pos ? (
+            <span style={{ color: m.pos > 0 ? CFB_SIDE_COLOR.yes : CFB_SIDE_COLOR.no, fontWeight: 700 }}>
+              {' '}· you {Math.abs(m.pos)} {m.pos > 0 ? 'YES' : 'NO'}
+            </span>
+          ) : null}
+        </div>
+      </div>
+      {btn('yes')}
+      {btn('no')}
+    </div>
+  )
+}
+
+function CFBTab() {
+  const [snap, setSnap] = useState(null)
+  const [err, setErr] = useState('')
+  const [live, setLive] = useState({})        // ticker -> { yes_bid, yes_ask } (0-1, from WS)
+  const [wsUp, setWsUp] = useState(false)
+  const [open, setOpen] = useState({})        // series -> expanded?
+  const [sel, setSel] = useState(null)        // { ticker, side, label, group }
+  const [ob, setOb] = useState(null)
+  const [take, setTake] = useState(50)        // cents: the most we'll pay per contract
+  const [spend, setSpend] = useState(25)      // dollars
+  const [token, setToken] = useState(() => localStorage.getItem('pitchpulse_token') || '')
+  const [showPin, setShowPin] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [result, setResult] = useState(null)
+
+  // Snapshot every 30s picks up new/closed markets; the socket carries prices between.
+  useEffect(() => {
+    let alive = true
+    const load = () => fetch(`${API}/api/cfb/markets?game=${CFB_GAME}`)
+      .then(r => r.json())
+      .then(d => {
+        if (!alive) return
+        if (d.groups?.length) { setSnap(d); setErr('') } else setErr(d.error || 'No open markets found')
+      })
+      .catch(e => alive && setErr(e.message))
+    load()
+    const t = setInterval(load, 30000)
+    return () => { alive = false; clearInterval(t) }
+  }, [])
+
+  useEffect(() => {
+    let ws, timer, alive = true
+    const connect = () => {
+      ws = new WebSocket(getKalshiWsUrl({ cfbGame: CFB_GAME }))
+      ws.onmessage = (e) => {
+        const d = JSON.parse(e.data)
+        if (d.status === 'connected') setWsUp(true)
+        else if (d.type === 'price') setLive(prev => ({ ...prev, [d.ticker]: { yes_bid: d.yes_bid, yes_ask: d.yes_ask } }))
+      }
+      ws.onclose = () => { setWsUp(false); if (alive) timer = setTimeout(connect, 3000) }
+      ws.onerror = () => ws.close()
+    }
+    connect()
+    return () => { alive = false; clearTimeout(timer); ws?.close() }
+  }, [])
+
+  // My positions on this game (account data, so it needs the trade token)
+  const [pos, setPos] = useState({})          // ticker -> signed contracts (+YES / −NO)
+  useEffect(() => {
+    if (!token) { setPos({}); return }
+    let alive = true
+    const load = () => fetch(`${API}/api/cfb/positions`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ game: CFB_GAME, trade_token: token }),
+    }).then(r => r.json()).then(d => {
+      if (alive && d.ok) setPos(Object.fromEntries(Object.entries(d.positions).map(([t, p]) => [t, p.position])))
+    }).catch(() => {})
+    load()
+    const t = setInterval(load, 5000)
+    return () => { alive = false; clearInterval(t) }
+  }, [token])
+
+  const withLive = (m) => {
+    const l = live[m.ticker]
+    const base = pos[m.ticker] ? { ...m, pos: pos[m.ticker] } : m
+    if (!l) return base
+    const yb = l.yes_bid > 0 ? Math.round(l.yes_bid * 100) : null
+    const ya = l.yes_ask > 0 && l.yes_ask < 1 ? Math.round(l.yes_ask * 100) : null
+    return { ...base, yes_bid: yb, yes_ask: ya, no_bid: ya != null ? 100 - ya : null, no_ask: yb != null ? 100 - yb : null }
+  }
+
+  // Full book for the market in the ticket, refreshed fast while it's open
+  const selTicker = sel?.ticker
+  const fetchOb = useCallback(async () => {
+    if (!selTicker) return
+    try {
+      const r = await fetch(`${API}/api/kalshi/orderbook/${selTicker}`)
+      const d = await r.json()
+      if (!d.error && d.ticker === selTicker) setOb(d)
+    } catch {}
+  }, [selTicker])
+
+  useEffect(() => {
+    setOb(null)
+    if (!selTicker) return
+    fetchOb()
+    const t = setInterval(fetchOb, 2000)
+    return () => clearInterval(t)
+  }, [selTicker, fetchOb])
+
+  const pick = (m, side, group) => {
+    if (sel?.ticker === m.ticker && sel?.side === side) { setSel(null); return }
+    const ask = side === 'yes' ? m.yes_ask : m.no_ask
+    setSel({ ticker: m.ticker, side, label: m.label, group })
+    setTake(ask ?? 50)
+    setResult(null)
+  }
+
+  const lock = () => { localStorage.removeItem('pitchpulse_token'); setToken('') }
+
+  const ladder = sideLadder(ob, sel?.side)
+  const selMarket = sel && snap?.groups.flatMap(g => g.markets).find(m => m.ticker === sel.ticker)
+  const liveSel = selMarket ? withLive(selMarket) : null
+  const bestAsk = ladder.asks[0]?.price ?? (liveSel ? (sel.side === 'yes' ? liveSel.yes_ask : liveSel.no_ask) : null)
+  const plan = cfbSweep(ladder.asks, take, Math.round(spend * 100))
+  const depth = ladder.asks.filter(l => l.price <= take).reduce((s, l) => s + l.size, 0)
+  const over = bestAsk != null ? take - bestAsk : null
+  const sideColor = CFB_SIDE_COLOR[sel?.side] || '#22c55e'
+
+  const execute = async () => {
+    if (!sel || !token) return
+    const { ticker, side, label } = sel
+    setBusy(true)
+    setResult(null)
+    try {
+      const r = await fetch(`${API}/api/trade/execute`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ticker, side, max_price_cents: take,
+          max_spend_cents: Math.round(spend * 100), trade_token: token,
+        }),
+      })
+      const d = await r.json()
+      setResult({ ...d, label, side, take })
+      if (d?.error === 'Unauthorized') { lock(); setShowPin(true) }
+    } catch (e) {
+      setResult({ ok: false, error: e.message })
+    } finally {
+      setBusy(false)
+      fetchOb()
+    }
+  }
+
+  const expanded = (s) => open[s] ?? CFB_DEFAULT_OPEN.has(s)
+  const setAll = (v) => setOpen(Object.fromEntries((snap?.groups || []).map(g => [g.series, v])))
+  const chip = (activeNow) => ({
+    flex: 1, padding: '6px 0', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer',
+    border: `1px solid ${activeNow ? sideColor : '#334155'}`,
+    background: activeNow ? `${sideColor}22` : '#0f172a', color: activeNow ? sideColor : '#94a3b8',
+  })
+  const stepBtn = {
+    width: 40, height: 40, borderRadius: 10, border: '1px solid #334155', background: '#0f172a',
+    color: '#e2e8f0', fontSize: 20, fontWeight: 700, cursor: 'pointer',
+  }
+
+  return (
+    <div style={{ animation: 'fadeIn 0.3s ease' }}>
+      {showPin && <TradeUnlockModal onClose={() => setShowPin(false)}
+        onUnlocked={(t) => { setToken(t); setShowPin(false) }} />}
+
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12 }}>
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 800, color: '#e2e8f0' }}>{(snap?.title || 'Rice vs Notre Dame').toUpperCase()}</div>
+          <div style={{ fontSize: 11, color: '#475569' }}>
+            Sat 9/12{snap ? ` · ${snap.market_count} markets · ${snap.groups.length} types` : ''}
+          </div>
+        </div>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          {token
+            ? <span onClick={lock} style={{ fontSize: 10, color: '#f59e0b', fontWeight: 700, cursor: 'pointer' }}>TRADING ●</span>
+            : <span onClick={() => setShowPin(true)} style={{ fontSize: 10, color: '#475569', fontWeight: 600, cursor: 'pointer' }}>VIEW ONLY</span>}
+          {wsUp && <span style={{ fontSize: 10, color: '#22c55e', fontWeight: 700 }}>● LIVE</span>}
+        </div>
+      </div>
+
+      {err && !snap && <div style={{ fontSize: 13, color: '#ef4444', textAlign: 'center', padding: 20 }}>{err}</div>}
+      {!snap && !err && <div style={{ fontSize: 13, color: '#475569', textAlign: 'center', padding: 40 }}>Loading Kalshi markets...</div>}
+
+      {snap && (
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 12, marginBottom: 8, fontSize: 11 }}>
+          <span onClick={() => setAll(true)} style={{ color: '#3b82f6', cursor: 'pointer' }}>expand all</span>
+          <span onClick={() => setAll(false)} style={{ color: '#3b82f6', cursor: 'pointer' }}>collapse all</span>
+        </div>
+      )}
+
+      {snap?.groups.map(g => {
+        const isOpen = expanded(g.series)
+        const markets = g.markets.map(withLive)
+        // Flag the market priced closest to a coin flip — the de facto line on a ladder
+        let lineIdx = -1
+        if (markets.length > 3) {
+          let best = Infinity
+          markets.forEach((m, i) => {
+            if (m.yes_bid == null || m.yes_ask == null) return
+            const d = Math.abs((m.yes_bid + m.yes_ask) / 2 - 50)
+            if (d < best) { best = d; lineIdx = i }
+          })
+        }
+        return (
+          <div key={g.series} style={{ background: '#1e293b', borderRadius: 12, marginBottom: 8, border: '1px solid #334155', overflow: 'hidden' }}>
+            <div onClick={() => setOpen(o => ({ ...o, [g.series]: !isOpen }))} style={{
+              display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+              padding: '10px 12px', cursor: 'pointer',
+            }}>
+              <span style={{ fontSize: 13, fontWeight: 700, color: '#e2e8f0' }}>{g.title}</span>
+              <span style={{ fontSize: 11, color: '#475569' }}>{markets.length} {isOpen ? '▼' : '▶'}</span>
+            </div>
+            {isOpen && (
+              <div style={{ padding: '0 10px 6px 4px' }}>
+                {markets.map((m, i) => (
+                  <CFBMarketRow key={m.ticker} m={m} sel={sel} isLine={i === lineIdx}
+                    onPick={(mk, side) => pick(mk, side, g.title)} />
+                ))}
+              </div>
+            )}
+          </div>
+        )
+      })}
+
+      {/* Room so the fixed ticket never covers the last rows */}
+      {sel && <div style={{ height: 340 }} />}
+
+      {sel && (
+        <div style={{ position: 'fixed', left: 0, right: 0, bottom: 0, zIndex: 50, display: 'flex', justifyContent: 'center', pointerEvents: 'none' }}>
+          <div style={{
+            width: '100%', maxWidth: 480, pointerEvents: 'auto', background: '#1e293b',
+            borderTop: `2px solid ${sideColor}`, borderRadius: '14px 14px 0 0',
+            padding: '12px 16px calc(12px + env(safe-area-inset-bottom))',
+            boxShadow: '0 -8px 24px rgba(0,0,0,0.5)',
+          }}>
+            {/* What we're buying */}
+            <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: 10 }}>
+              <span style={{ fontSize: 11, fontWeight: 800, color: '#000', background: sideColor, borderRadius: 4, padding: '2px 6px' }}>
+                BUY {sel.side.toUpperCase()}
+              </span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: '#e2e8f0', lineHeight: 1.25 }}>{sel.label}</div>
+                <div style={{ fontSize: 10, color: '#475569' }}>{sel.group}</div>
+              </div>
+              <span onClick={() => setSel(null)} style={{ fontSize: 18, color: '#475569', cursor: 'pointer', lineHeight: 1 }}>×</span>
+            </div>
+
+            {/* Take price */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 }}>
+              <button style={stepBtn} onClick={() => setTake(t => Math.max(1, t - 1))}>−</button>
+              <div style={{ flex: 1, textAlign: 'center' }}>
+                <div style={{ fontSize: 9, color: '#475569' }}>MAX PRICE</div>
+                <div style={{ fontSize: 28, fontWeight: 900, color: sideColor, lineHeight: 1 }}>{take}¢</div>
+                <div style={{ fontSize: 10, color: over != null && over >= 5 ? '#f59e0b' : '#475569' }}>
+                  {bestAsk == null ? 'no ask' : over === 0 ? 'at best ask' : over > 0 ? `${over}¢ over ask (${bestAsk}¢)` : `${-over}¢ under ask (${bestAsk}¢)`}
+                </div>
+              </div>
+              <button style={stepBtn} onClick={() => setTake(t => Math.min(99, t + 1))}>+</button>
+            </div>
+            <input type="range" min={1} max={99} value={take} onChange={e => setTake(Number(e.target.value))}
+              style={{ width: '100%', accentColor: sideColor, margin: '2px 0 8px' }} />
+            <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
+              {CFB_BUMPS.map(([b, lab]) => (
+                <button key={lab} disabled={bestAsk == null} style={chip(bestAsk != null && take === Math.min(99, bestAsk + b))}
+                  onClick={() => setTake(Math.min(99, bestAsk + b))}>{lab}</button>
+              ))}
+            </div>
+
+            {/* Spend */}
+            <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginBottom: 8 }}>
+              {CFB_SPEND_CHIPS.map(v => (
+                <button key={v} style={chip(spend === v)} onClick={() => setSpend(v)}>${v}</button>
+              ))}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                <span style={{ fontSize: 12, color: '#94a3b8' }}>$</span>
+                <input value={spend} onChange={e => setSpend(Number(e.target.value) || 0)} type="number" inputMode="decimal"
+                  style={{ width: 52, padding: '5px 6px', borderRadius: 8, background: '#0f172a', border: '1px solid #334155', color: '#f1f5f9', fontSize: 13, outline: 'none' }} />
+              </div>
+            </div>
+
+            {/* Fill preview from the live book */}
+            <div style={{ fontSize: 12, color: '#94a3b8', marginBottom: 10, minHeight: 16 }}>
+              {!ob ? 'Loading book...'
+                : plan.contracts === 0 ? <span style={{ color: '#475569' }}>Nothing fills at ≤{take}¢ ({depth.toLocaleString()} available)</span>
+                : <>≈ <b style={{ color: '#e2e8f0' }}>{plan.contracts}</b> @ avg {(plan.cost / plan.contracts).toFixed(1)}¢ · ${(plan.cost / 100).toFixed(2)} + ~${(plan.fee / 100).toFixed(2)} fee · pays <b style={{ color: '#22c55e' }}>${plan.contracts.toFixed(2)}</b></>}
+            </div>
+
+            {token
+              ? <SlideToConfirm color={sideColor} busy={busy} disabled={!ob || plan.contracts === 0}
+                  label={`SLIDE TO BUY ${sel.side.toUpperCase()} ≤${take}¢ →`} onConfirm={execute} />
+              : <button onClick={() => setShowPin(true)} style={{
+                  width: '100%', height: 48, borderRadius: 24, border: '1px solid #f59e0b55',
+                  background: '#0f172a', color: '#f59e0b', fontSize: 13, fontWeight: 700, cursor: 'pointer',
+                }}>Unlock trading</button>}
+
+            {result && (
+              <div style={{ marginTop: 8, fontSize: 12 }}>
+                {result.ok
+                  ? <span style={{ color: '#22c55e', fontWeight: 700 }}>
+                      Filled {result.summary.total_contracts} {result.side?.toUpperCase()} @ avg {(result.summary.total_cost_cents / result.summary.total_contracts).toFixed(1)}¢ · ${(result.summary.total_cost_cents / 100).toFixed(2)}
+                    </span>
+                  : <span style={{ color: '#ef4444', wordBreak: 'break-word' }}>
+                      Not filled: {result.error || result.orders?.find(o => o.error)?.error || 'no contracts at that price'}
+                    </span>}
+                <span onClick={() => setResult(null)} style={{ marginLeft: 8, color: '#475569', cursor: 'pointer' }}>dismiss</span>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Fantasy draft board (multi-source PPR consensus) ─────────────────────────
 const FF_POSITIONS = ['ALL', 'FLEX', 'QB', 'RB', 'WR', 'TE', 'K', 'DEF']
 const FF_SORTS = [['consensus', 'Board'], ['value', 'Value'], ['spread', 'Disagree']]
@@ -3083,6 +3567,7 @@ export default function App() {
           { id: 'sim',      label: '⚾ Sim' },
           { id: 'batch',    label: '📊 1K' },
           { id: 'plakata',  label: '💥 PitchPulse' },
+          { id: 'cfb',      label: '🏟️ CFB' },
           { id: 'spring',   label: '🌸 Odds' },
           { id: 'hr',       label: '💣 HR' },
           { id: 'ff',       label: '🏈 FF' },
@@ -3096,7 +3581,7 @@ export default function App() {
         ))}
       </div>
 
-      {tab === 'research' ? <ResearchTab /> : tab === 'sim' ? <AtBatTab /> : tab === 'batch' ? <BatchSimTab /> : tab === 'plakata' ? <PlakataTab /> : tab === 'hr' ? <HRScannerTab /> : tab === 'ff' ? <FantasyTab /> : <SpringOddsTab />}
+      {tab === 'research' ? <ResearchTab /> : tab === 'sim' ? <AtBatTab /> : tab === 'batch' ? <BatchSimTab /> : tab === 'plakata' ? <PlakataTab /> : tab === 'cfb' ? <CFBTab /> : tab === 'hr' ? <HRScannerTab /> : tab === 'ff' ? <FantasyTab /> : <SpringOddsTab />}
 
       <style>{`
         * { box-sizing: border-box; }
