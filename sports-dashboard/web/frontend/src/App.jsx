@@ -3424,15 +3424,27 @@ function CFBTab() {
 
       <CFBScorebug espn={espn} espnErr={espnErr} manual={manual} setManual={setManual} />
 
-      {snap && gs && gs.state !== 'pre' && (
-        <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
-          <button disabled={!allLockLegs.length} onClick={() => openSweep({ kind: 'locks', series: null, title: 'Every locked market' })} style={{
-            ...cfbChip(allLockLegs.length > 0), flex: 1, padding: '9px 0', opacity: allLockLegs.length ? 1 : 0.5,
-          }}>🔒 Sweep locks ({allLockLegs.length})</button>
-          <button onClick={() => openSweep({ kind: 'spread', series: 'KXNCAAFSPREAD', title: 'Covered spread lines', team: leader, cushion: 9, withNo: true })}
-            style={{ ...cfbChip(false), flex: 1, padding: '9px 0' }}>⚡ Sweep spread</button>
-        </div>
-      )}
+      {snap && (() => {
+        // No score to sweep against before kickoff: show the buttons, disabled.
+        const pregame = !gs || gs.state === 'pre'
+        const canLocks = !pregame && allLockLegs.length > 0
+        return (
+          <>
+            <div style={{ display: 'flex', gap: 8, marginBottom: pregame ? 4 : 10 }}>
+              <button disabled={!canLocks} onClick={() => openSweep({ kind: 'locks', series: null, title: 'Every locked market' })} style={{
+                ...cfbChip(canLocks), flex: 1, padding: '9px 0', opacity: canLocks ? 1 : 0.5, cursor: canLocks ? 'pointer' : 'default',
+              }}>🔒 Sweep locks ({pregame ? 0 : allLockLegs.length})</button>
+              <button disabled={pregame} onClick={() => openSweep({ kind: 'spread', series: 'KXNCAAFSPREAD', title: 'Covered spread lines', team: leader, cushion: 9, withNo: true })}
+                style={{ ...cfbChip(false), flex: 1, padding: '9px 0', opacity: pregame ? 0.5 : 1, cursor: pregame ? 'default' : 'pointer' }}>⚡ Sweep spread</button>
+            </div>
+            {pregame && (
+              <div style={{ fontSize: 10, color: '#475569', marginBottom: 10 }}>
+                Sweeps unlock at kickoff, or tap ✎ manual to enter a score.
+              </div>
+            )}
+          </>
+        )
+      })()}
       {nLocked > 0 && (
         <div style={{ fontSize: 10, color: '#475569', marginBottom: 8 }}>
           {nLocked} markets decided{nPending ? ` · ${nPending} ⏳ settling (45s review buffer)` : ''}
