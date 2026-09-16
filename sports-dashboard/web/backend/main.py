@@ -1467,7 +1467,7 @@ async def kalshi_game_tickers(home_team: str = "", away_team: str = ""):
 # ---------------------------------------------------------------------------
 
 @app.websocket("/api/ws/kalshi")
-async def kalshi_ws_proxy(websocket: WebSocket, ticker: str = "", game_key: str = "", cfb_game: str = ""):
+async def kalshi_ws_proxy(websocket: WebSocket, ticker: str = "", game_key: str = "", cfb_game: str = "", mlb_game: str = ""):
     """Subscribe to both sides of a Kalshi game and stream price updates.
 
     Pass either:
@@ -1476,6 +1476,8 @@ async def kalshi_ws_proxy(websocket: WebSocket, ticker: str = "", game_key: str 
         → auto-finds both team tickers and subscribes to both
       - cfb_game: a college football game code (e.g. 26SEP12RICEND)
         → subscribes to every open market in /api/cfb/markets for that game
+      - mlb_game: an MLB board game key (e.g. 26SEP151840CWSCLE)
+        → subscribes to every open market in /api/mlb/board/markets for that game
     """
     await websocket.accept()
 
@@ -1505,6 +1507,17 @@ async def kalshi_ws_proxy(websocket: WebSocket, ticker: str = "", game_key: str 
         if _CFB_GAME_RE.match(cfb_game):
             try:
                 snap = await _cfb_snapshot(cfb_game)
+            except Exception:
+                snap = {}
+            for g in snap.get("groups", []):
+                for m in g["markets"]:
+                    tickers.append(m["ticker"])
+                    ticker_team_map[m["ticker"]] = m["ticker"]
+    elif mlb_game:
+        mlb_game = mlb_game.upper()
+        if _MLB_KEY_RE.match(mlb_game):
+            try:
+                snap = await _mlb_snapshot(mlb_game)
             except Exception:
                 snap = {}
             for g in snap.get("groups", []):
@@ -2053,6 +2066,11 @@ async def cfb_positions(req: CfbPositionsRequest):
     game = req.game.upper()
     if not _CFB_GAME_RE.match(game):
         return {"ok": False, "error": "bad game code"}
+    return await _kalshi_positions_for_game(game)
+
+
+async def _kalshi_positions_for_game(game: str) -> dict:
+    """Signed positions on every market whose ticker carries this game key."""
     import httpx
     path = "/trade-api/v2/portfolio/positions"
     out, cursor = {}, None
@@ -2074,7 +2092,7 @@ async def cfb_positions(req: CfbPositionsRequest):
                 body = r.json()
                 for p in body.get("market_positions", []):
                     t = p.get("ticker") or ""
-                    if f"-{game}-" not in t:
+                    if f"-{game}-" not in t and not t.endswith(f"-{game}"):
                         continue
                     try:
                         n = int(float(p.get("position_fp") or 0))
@@ -2351,6 +2369,7 @@ async def _kalshi_ioc_buy(client, ticker: str, side: str, price_cents: int, coun
     return {**result, "ok": True, "filled": _cfb_int(r.json().get("fill_count"))}
 
 
+@app.post("/api/sweep/preview")
 @app.post("/api/cfb/sweep/preview")
 async def cfb_sweep_preview(req: CfbSweepRequest):
     """What a sweep would buy right now, from the live books."""
@@ -2361,6 +2380,7 @@ async def cfb_sweep_preview(req: CfbSweepRequest):
     return _cfb_plan(req, books)
 
 
+@app.post("/api/sweep/execute")
 @app.post("/api/cfb/sweep/execute")
 async def cfb_sweep_execute(req: CfbSweepRequest):
     """Re-plan from fresh books, then send the IOC orders (legs in parallel)."""
@@ -2406,6 +2426,360 @@ async def cfb_sweep_execute(req: CfbSweepRequest):
             "errors": [o["error"][:200] for o in orders if not o["ok"]][:3],
         },
     }
+
+
+# ---------------------------------------------------------------------------
+# MLB game board: every Kalshi game / segment / inning market for one game
+# ---------------------------------------------------------------------------
+
+# Unlike CFB, one /markets?series_ticker= call per series returns every game
+# at once (a dozen series, ~2k markets), so the board sweeps the series list
+# on a short cache and slices out one game. Event tickers share a game key:
+# KXMLBSPREAD-26SEP151840CWSCLE-CLE6, KXMLBINNINGWIN-26SEP151840CWSCLE-9-CLE
+# (yyMONdd, ET start HHMM, away code, home code[, inning]). Player props are
+# deliberately left out. Kalshi closes each inning's markets about a minute
+# after the inning ends, and segment markets (F3/F5/F7, RFI) when they settle.
+MLB_BOARD_SERIES = [
+    ("KXMLBGAME", "Moneyline"),
+    ("KXMLBSPREAD", "Run line"),
+    ("KXMLBTOTAL", "Game total"),
+    ("KXMLBTEAMTOTAL", "Team totals"),
+    ("KXMLBEXTRAS", "Extra innings"),
+    ("KXMLBF3", "First 3 innings"),
+    ("KXMLBF5", "First 5 innings"),
+    ("KXMLBF5SPREAD", "First 5 spread"),
+    ("KXMLBF5TOTAL", "First 5 total"),
+    ("KXMLBF7", "First 7 innings"),
+    ("KXMLBRFI", "1st inning"),
+    ("KXMLBINNINGWIN", "Inning winner"),
+    ("KXMLBINNINGTOTAL", "Inning runs"),
+]
+_MLB_SERIES_TITLE = dict(MLB_BOARD_SERIES)
+_MLB_INNING_KINDS = ("RFI", "INNINGWIN", "INNINGTOTAL")
+_MLB_KIND_ORDER = {"INNINGWIN": 0, "RFI": 1, "INNINGTOTAL": 1}
+_MLB_KEY_RE = re.compile(r"^(\d{2})([A-Z]{3})(\d{2})(\d{2})(\d{2})([A-Z]+)$")
+_MLB_MONTHS = {m: i for i, m in enumerate(
+    ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"], 1)}
+_MLB_MARKETS_TTL = 20.0
+_MLB_STATE_TTL = 3.0
+_MLB_SCHEDULE_TTL = 120.0
+_mlb_markets_cache = {"at": 0.0, "by_game": {}, "games": {}}
+_mlb_markets_lock = asyncio.Lock()
+_mlb_state_cache = {}       # game_pk -> {"at": float, "data": dict}
+_mlb_schedule_cache = {}    # yyyy-mm-dd -> {"at": float, "games": list}
+
+
+def _mlb_ordinal(n: int) -> str:
+    suffix = "th" if 10 <= n % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
+
+
+def _mlb_key_parts(key: str) -> Optional[dict]:
+    """26SEP151840CWSCLE -> ET date, UTC start, concatenated team codes."""
+    mm = _MLB_KEY_RE.match(key)
+    if not mm or mm.group(2) not in _MLB_MONTHS:
+        return None
+    yy, mon, dd, hh, mi, teams = mm.groups()
+    try:
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("America/New_York")
+    except Exception:
+        tz = timezone(timedelta(hours=-4))
+    try:
+        start = datetime(2000 + int(yy), _MLB_MONTHS[mon], int(dd), int(hh), int(mi), tzinfo=tz)
+    except ValueError:
+        return None
+    return {"date": start.strftime("%Y-%m-%d"), "start": start.astimezone(timezone.utc), "teams": teams}
+
+
+def _mlb_parse_ticker(ticker: str) -> Optional[dict]:
+    """KXMLBINNINGWIN-26SEP161507DETTOR-9-TOR -> kind, game key, inning, suffix."""
+    parts = ticker.split("-")
+    if len(parts) < 2 or not parts[0].startswith("KXMLB"):
+        return None
+    kind, key = parts[0][len("KXMLB"):], parts[1]
+    inning, suffix = None, None
+    if kind in ("INNINGWIN", "INNINGTOTAL"):
+        if len(parts) < 3 or not parts[2].isdigit():
+            return None
+        inning, suffix = int(parts[2]), (parts[3] if len(parts) > 3 else None)
+    elif kind == "RFI":
+        inning = 1
+    else:
+        suffix = parts[2] if len(parts) > 2 else None
+    return {"kind": kind, "key": key, "inning": inning, "suffix": suffix}
+
+
+async def _mlb_markets() -> dict:
+    """Every open market in MLB_BOARD_SERIES, grouped by game key, plus the
+    games index built from the moneyline markets (team codes and names)."""
+    async with _mlb_markets_lock:
+        if time.time() - _mlb_markets_cache["at"] < _MLB_MARKETS_TTL:
+            return _mlb_markets_cache
+        import httpx
+        sem = asyncio.Semaphore(4)
+
+        async def load(series: str) -> tuple:
+            out, cursor = [], None
+            async with sem:
+                for _ in range(6):
+                    params = {"series_ticker": series, "status": "open", "limit": 1000}
+                    if cursor:
+                        params["cursor"] = cursor
+                    r = await _cfb_get(client, f"{KALSHI_API_BASE}/markets", params)
+                    if r.status_code != 200:
+                        return series, None
+                    body = r.json()
+                    out.extend(body.get("markets") or [])
+                    cursor = body.get("cursor")
+                    if not cursor:
+                        break
+            return series, out
+
+        async with httpx.AsyncClient(timeout=15.0, headers={"accept": "application/json"}) as client:
+            results = await asyncio.gather(*(load(s) for s, _ in MLB_BOARD_SERIES))
+
+        prev = _mlb_markets_cache
+        by_game, games = {}, {}
+        for series, markets in results:
+            if markets is None:
+                # A failed series read keeps its previous markets rather than vanishing.
+                markets = [m for ms in prev["by_game"].values() for m in ms if m.get("ticker", "").startswith(series + "-")]
+            for m in markets:
+                p = _mlb_parse_ticker(m.get("ticker") or "")
+                if not p or not _MLB_KEY_RE.match(p["key"]):
+                    continue
+                by_game.setdefault(p["key"], []).append(m)
+                if p["kind"] == "GAME" and p["suffix"]:
+                    name = re.sub(r"\s+wins$", "", m.get("title") or "").strip() or p["suffix"]
+                    games.setdefault(p["key"], {})[p["suffix"]] = name
+
+        index = {}
+        for key, codes in games.items():
+            parts = _mlb_key_parts(key)
+            if not parts or len(codes) != 2:
+                continue
+            away = next((c for c in codes if parts["teams"].startswith(c) and parts["teams"] == c + next(o for o in codes if o != c)), None)
+            if not away:
+                continue
+            home = next(c for c in codes if c != away)
+            index[key] = {
+                "key": key,
+                "date": parts["date"],
+                "start": parts["start"].isoformat(),
+                "away": {"code": away, "name": codes[away]},
+                "home": {"code": home, "name": codes[home]},
+                "title": f"{codes[away]} @ {codes[home]}",
+                "market_count": len(by_game.get(key, [])),
+            }
+        _mlb_markets_cache.update({"at": time.time(), "by_game": by_game, "games": index})
+        return _mlb_markets_cache
+
+
+async def _mlb_schedule(date: str) -> list:
+    cached = _mlb_schedule_cache.get(date)
+    if cached and time.time() - cached["at"] < _MLB_SCHEDULE_TTL:
+        return cached["games"]
+    import httpx
+    games = []
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        r = await client.get(f"{MLB_API}/schedule", params={"sportId": 1, "date": date})
+        if r.status_code == 200:
+            for d in r.json().get("dates", []):
+                for g in d.get("games", []):
+                    games.append({
+                        "game_pk": g["gamePk"],
+                        "away": g["teams"]["away"]["team"]["name"],
+                        "home": g["teams"]["home"]["team"]["name"],
+                        "game_date": g.get("gameDate") or "",
+                        "status": (g.get("status") or {}).get("abstractGameState"),
+                        "detail": (g.get("status") or {}).get("detailedState"),
+                    })
+    _mlb_schedule_cache[date] = {"at": time.time(), "games": games}
+    return games
+
+
+def _mlb_names_match(kalshi_name: str, mlb_name: str) -> bool:
+    k, frag = kalshi_name.lower().strip(), _kalshi_name(mlb_name)
+    return bool(k) and bool(frag) and (k.startswith(frag) or frag.startswith(k))
+
+
+async def _mlb_match_game(info: dict) -> Optional[dict]:
+    """The MLB StatsAPI game behind a Kalshi game (doubleheaders: nearest start)."""
+    sched = await _mlb_schedule(info["date"])
+    hits = [g for g in sched
+            if _mlb_names_match(info["away"]["name"], g["away"]) and _mlb_names_match(info["home"]["name"], g["home"])]
+    if not hits:
+        return None
+    if len(hits) == 1:
+        return hits[0]
+    start = datetime.fromisoformat(info["start"])
+
+    def gap(g):
+        try:
+            return abs((datetime.fromisoformat(g["game_date"].replace("Z", "+00:00")) - start).total_seconds())
+        except ValueError:
+            return float("inf")
+    return min(hits, key=gap)
+
+
+def _mlb_board_market(m: dict, p: dict, codes: set) -> dict:
+    out = _cfb_market(m)
+    team = re.sub(r"\d+$", "", p["suffix"] or "")
+    out["kind"] = p["kind"]
+    out["inning"] = p["inning"]
+    out["team"] = team if team in codes else ("TIE" if team == "TIE" else None)
+    if p["kind"] == "RFI":
+        out["strike"] = 0.5      # listed as ">= 1 run"; treated as an over-0.5 inning total
+    return out
+
+
+async def _mlb_snapshot(key: str) -> dict:
+    cache = await _mlb_markets()
+    info = cache["games"].get(key)
+    if not info:
+        return {"game": key, "error": "no open Kalshi markets for this game", "groups": []}
+    codes = {info["away"]["code"], info["home"]["code"]}
+    team_rank = {info["away"]["code"]: 0, info["home"]["code"]: 1, "TIE": 2}
+    groups = {}
+    for m in cache["by_game"].get(key, []):
+        p = _mlb_parse_ticker(m["ticker"])
+        if p["kind"] in _MLB_INNING_KINDS:
+            gkey, title, inning = f"INNING{p['inning']}", f"{_mlb_ordinal(p['inning'])} inning", p["inning"]
+        else:
+            gkey, title, inning = m["ticker"].split("-")[0], _MLB_SERIES_TITLE.get(m["ticker"].split("-")[0], p["kind"]), None
+        g = groups.setdefault(gkey, {"series": gkey, "title": title, "inning": inning, "markets": []})
+        g["markets"].append(_mlb_board_market(m, p, codes))
+
+    def rank(g):
+        if g["inning"] is not None:
+            return (100 + g["inning"], "")
+        order = [s for s, _ in MLB_BOARD_SERIES]
+        return (order.index(g["series"]) if g["series"] in order else 99, g["series"])
+
+    out = sorted(groups.values(), key=rank)
+    for g in out:
+        g["markets"].sort(key=lambda m: (_MLB_KIND_ORDER.get(m["kind"], 0), team_rank.get(m["team"], 3), m["strike"] or 0, m["ticker"]))
+    return {
+        **info,
+        "game": key,
+        "groups": out,
+        "market_count": sum(len(g["markets"]) for g in out),
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+async def _mlb_state(game_pk: int) -> dict:
+    """Live linescore from the MLB feed, in the shape the lock rules read."""
+    cached = _mlb_state_cache.get(game_pk)
+    if cached and time.time() - cached["at"] < _MLB_STATE_TTL:
+        return cached["data"]
+    import httpx
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        r = await client.get(f"https://statsapi.mlb.com/api/v1.1/game/{game_pk}/feed/live")
+    if r.status_code != 200:
+        return {"error": "Game feed unavailable", "status": "pre"}
+    data = r.json()
+    gd, ls = data.get("gameData", {}), data.get("liveData", {}).get("linescore", {})
+    st = gd.get("status", {})
+    abstract = st.get("abstractGameState", "Preview")
+    status = "post" if abstract == "Final" else "in" if abstract == "Live" else "pre"
+    half = {"Top": "top", "Middle": "mid", "Bottom": "bot", "End": "end"}.get(ls.get("inningState") or "", "top")
+    innings = []
+    for i in ls.get("innings") or []:
+        innings.append({
+            "n": _cfb_int(i.get("num")),
+            "away": _cfb_int((i.get("away") or {}).get("runs")),
+            "home": _cfb_int((i.get("home") or {}).get("runs")),
+        })
+    teams = ls.get("teams") or {}
+    out = {
+        "game_pk": game_pk,
+        "status": status,
+        "detail": st.get("detailedState"),
+        "inning": _cfb_int(ls.get("currentInning")) or (len(innings) or 1),
+        "half": half,
+        "outs": _cfb_int(ls.get("outs")),
+        "runs": {"away": _cfb_int((teams.get("away") or {}).get("runs")), "home": _cfb_int((teams.get("home") or {}).get("runs"))},
+        "innings": innings,
+        "scheduled_innings": _cfb_int(ls.get("scheduledInnings")) or 9,
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _mlb_state_cache[game_pk] = {"at": time.time(), "data": out}
+    return out
+
+
+@app.on_event("startup")
+async def _mlb_board_warm():
+    async def go():
+        try:
+            await _mlb_markets()
+        except Exception:
+            pass
+    asyncio.create_task(go())
+
+
+@app.get("/api/mlb/board/games")
+async def mlb_board_games():
+    """Every MLB game with open Kalshi markets, with its MLB StatsAPI game when matched."""
+    try:
+        cache = await _mlb_markets()
+        games = sorted(cache["games"].values(), key=lambda g: (g["start"], g["key"]))
+        matches = await asyncio.gather(*(_mlb_match_game(g) for g in games))
+        out = []
+        for g, m in zip(games, matches):
+            out.append({**g, "game_pk": m["game_pk"] if m else None,
+                        "mlb_status": m["status"] if m else None, "mlb_detail": m["detail"] if m else None})
+        return {"games": out, "fetched_at": datetime.now(timezone.utc).isoformat()}
+    except Exception as e:
+        return {"games": [], "error": str(e)}
+
+
+@app.get("/api/mlb/board/markets")
+async def mlb_board_markets(game: str):
+    """Every open Kalshi market for one MLB game, grouped by type / inning."""
+    game = game.upper()
+    if not _MLB_KEY_RE.match(game):
+        return {"error": "bad game key", "groups": []}
+    try:
+        return await _mlb_snapshot(game)
+    except Exception as e:
+        return {"error": str(e), "groups": []}
+
+
+@app.get("/api/mlb/board/state")
+async def mlb_board_state(game: str):
+    """Live linescore for one Kalshi game key (via the matched MLB game)."""
+    game = game.upper()
+    if not _MLB_KEY_RE.match(game):
+        return {"error": "bad game key", "status": "pre"}
+    try:
+        cache = await _mlb_markets()
+        info = cache["games"].get(game)
+        if not info:
+            return {"error": "unknown game", "status": "pre"}
+        m = await _mlb_match_game(info)
+        if not m:
+            return {"error": "no MLB game matched", "status": "pre"}
+        state = await _mlb_state(m["game_pk"])
+        return {**state, "teams": {"away": info["away"]["code"], "home": info["home"]["code"]}}
+    except Exception as e:
+        return {"error": str(e), "status": "pre"}
+
+
+class MlbPositionsRequest(BaseModel):
+    trade_token: str
+    game: str
+
+
+@app.post("/api/mlb/positions")
+async def mlb_positions(req: MlbPositionsRequest):
+    if not _verify_trade_token(req.trade_token):
+        return {"ok": False, "error": "Unauthorized"}
+    game = req.game.upper()
+    if not _MLB_KEY_RE.match(game):
+        return {"ok": False, "error": "bad game key"}
+    return await _kalshi_positions_for_game(game)
 
 
 # ---------------------------------------------------------------------------
