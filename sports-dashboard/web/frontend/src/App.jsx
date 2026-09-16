@@ -3725,11 +3725,12 @@ function CFBTab() {
   )
 }
 
-// ── MLB game board: every Kalshi market for one game, scored by the MLB feed ─
+// ── MLB game board: every Kalshi market for one game, hand-scored ───────────
 // Markets: /api/mlb/board/markets (game / segment / inning types, no player
-// props). Score: /api/mlb/board/state, the live linescore, so locks need no
-// hand-kept score. Sweeps reuse the CFB engine (/api/sweep/*); the rules that
-// decide legs live in mlbRules.js.
+// props). Score: MLBScoreKeeper, kept by hand so a sweep can be staged on the
+// 2nd out and fired on the 3rd (the MLB feed lags; /api/mlb/board/state exists
+// but the board doesn't read it). Sweeps reuse the CFB engine (/api/sweep/*);
+// the rules that decide legs live in mlbRules.js.
 const MLB_GAME_KEY = 'mlb_board_game'
 const MLB_DEFAULT_OPEN = new Set(['KXMLBGAME', 'KXMLBSPREAD', 'KXMLBTOTAL', 'KXMLBTEAMTOTAL'])
 const MLB_HALF = { top: 'Top', mid: 'Mid', bot: 'Bot', end: 'End' }
@@ -3784,15 +3785,57 @@ function MLBGamePicker({ games, value, onSelect }) {
   )
 }
 
-// Line score straight from the MLB feed
-function MLBScorebug({ st, away, home }) {
-  const n = Math.max(9, ...(st?.innings || []).map(i => i.n))
+// Hand-kept score: inning, half, outs, and runs per inning. It's the only game
+// state the board uses (user's choice: no feed lag between the 3rd out and the
+// sweep), and it's saved in this browser per game.
+const MLB_SCORE_KEY = (game) => `mlb_score_${game}`
+const MLB_BLANK_SCORE = { status: 'pre', inning: 1, half: 'top', outs: 0, innings: [] }
+const MLB_HALVES = [['top', 'Top'], ['mid', 'Mid'], ['bot', 'Bot'], ['end', 'End']]
+
+// The score as the lock rules read it (runs totals, team codes)
+function mlbScoreState(sc, teams) {
+  const s = sc || MLB_BLANK_SCORE
+  const runs = { away: 0, home: 0 }
+  for (const i of s.innings) { runs.away += i.away; runs.home += i.home }
+  return { ...s, runs, teams: { away: teams[0], home: teams[1] } }
+}
+
+const mlbEnsureInning = (s, n) => {
+  if (!s.innings.some(i => i.n === n)) s.innings = [...s.innings, { n, away: 0, home: 0 }].sort((a, b) => a.n - b.n)
+  return s
+}
+
+// Where the next tap of the big button takes the game
+const mlbNext = (s) =>
+  s.half === 'top' ? { half: 'mid' } : s.half === 'mid' ? { half: 'bot' }
+  : s.half === 'bot' ? { half: 'end' } : { inning: s.inning + 1, half: 'top' }
+
+function MLBScoreKeeper({ sc, setSc, away, home }) {
+  const [history, setHistory] = useState([])
+  const [armReset, setArmReset] = useState(false)
+  const st = mlbScoreState(sc, [away, home])
+  const live = st.status === 'in'
+  const final = st.status === 'post'
+
+  const apply = (fn) => {
+    const cur = { ...MLB_BLANK_SCORE, ...(sc || {}), innings: (sc?.innings || []).map(i => ({ ...i })) }
+    setHistory(h => [...h.slice(-29), cur])
+    const next = fn(cur) || cur
+    if (next.status === 'pre') next.status = 'in'
+    setSc(mlbEnsureInning(next, next.inning))
+  }
+  const undo = () => { if (!history.length) return; setSc(history[history.length - 1]); setHistory(h => h.slice(0, -1)) }
+  const reset = () => { if (!armReset) { setArmReset(true); setTimeout(() => setArmReset(false), 3000); return } setArmReset(false); setHistory([]); setSc(null) }
+  const advance = () => apply(s => ({ ...s, ...mlbNext(s), outs: 0 }))
+  const run = (side, d) => apply(s => { mlbEnsureInning(s, s.inning); const i = s.innings.find(x => x.n === s.inning); i[side] = Math.max(0, i[side] + d); return s })
+  const nextLabel = () => { const n = mlbNext(st); return `${MLB_HALF[n.half]} ${mlbOrd(n.inning ?? st.inning)}` }
+  const cur = st.innings.find(i => i.n === st.inning) || { away: 0, home: 0 }
+
+  const n = Math.max(9, ...st.innings.map(i => i.n))
   const cols = Array.from({ length: n }, (_, i) => i + 1)
-  const live = st?.status === 'in'
   const runsIn = (side, i) => {
-    const inn = st?.innings?.find(x => x.n === i)
+    const inn = st.innings.find(x => x.n === i)
     if (!inn) return ''
-    // The half that hasn't started yet stays blank
     if (live && i === st.inning && side === 'home' && (st.half === 'top' || st.half === 'mid')) return ''
     return inn[side]
   }
@@ -3801,16 +3844,29 @@ function MLBScorebug({ st, away, home }) {
     <tr>
       <td style={{ fontWeight: 800, color: '#e2e8f0', paddingRight: 8 }}>{code}</td>
       {cols.map(i => cell(runsIn(side, i), live && i === st.inning, i))}
-      <td style={{ textAlign: 'center', fontWeight: 900, color: '#f1f5f9', paddingLeft: 8, borderLeft: '1px solid #334155' }}>{st?.runs?.[side] ?? 0}</td>
+      <td style={{ textAlign: 'center', fontWeight: 900, color: '#f1f5f9', paddingLeft: 8, borderLeft: '1px solid #334155' }}>{st.runs[side]}</td>
     </tr>
   )
+  const label = { width: 44, fontSize: 10, fontWeight: 800, color: '#475569' }
+  const runBtns = (side, code) => (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+      <button style={cfbMiniBtn} onClick={() => run(side, -1)}>−</button>
+      <b style={{ color: '#e2e8f0', fontSize: 12, minWidth: 52, textAlign: 'center' }}>{code} {cur[side]}</b>
+      <button style={cfbMiniBtn} onClick={() => run(side, 1)}>+</button>
+    </div>
+  )
+
   return (
     <div style={{ background: '#1e293b', borderRadius: 12, border: '1px solid #334155', padding: '8px 12px', marginBottom: 10 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
         <span style={{ fontSize: 12, fontWeight: 800, color: live ? '#22c55e' : '#94a3b8' }}>{mlbStatusText(st)}</span>
-        <span style={{ fontSize: 10, color: '#475569' }}>MLB feed{st?.fetched_at ? '' : ' · waiting'}</span>
+        <span style={{ fontSize: 10, color: '#475569' }}>
+          hand-kept ·{' '}
+          <span onClick={undo} style={{ color: history.length ? '#3b82f6' : '#334155', cursor: 'pointer' }}>undo</span> ·{' '}
+          <span onClick={reset} style={{ color: armReset ? '#ef4444' : '#3b82f6', cursor: 'pointer' }}>{armReset ? 'tap again to reset' : 'reset'}</span>
+        </span>
       </div>
-      <div style={{ overflowX: 'auto' }}>
+      <div style={{ overflowX: 'auto', marginBottom: 8 }}>
         <table style={{ borderCollapse: 'collapse', fontSize: 12, width: '100%' }}>
           <thead>
             <tr style={{ color: '#475569', fontSize: 10 }}>
@@ -3821,6 +3877,37 @@ function MLBScorebug({ st, away, home }) {
           <tbody>{row('away', away)}{row('home', home)}</tbody>
         </table>
       </div>
+
+      {st.status === 'pre' ? (
+        <button onClick={() => apply(s => ({ ...s, status: 'in', inning: 1, half: 'top', outs: 0 }))}
+          style={{ ...cfbChip(true, '#22c55e'), width: '100%', padding: '9px 0' }}>▶ First pitch</button>
+      ) : (
+        <>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6, flexWrap: 'wrap' }}>
+            <span style={label}>INNING</span>
+            <SweepStepper value={st.inning} onChange={v => apply(s => ({ ...s, inning: v }))} min={1} max={20} />
+            {MLB_HALVES.map(([k, l]) => (
+              <button key={k} style={{ ...cfbChip(st.half === k && live), flex: 'none', width: 40, padding: '5px 0' }} onClick={() => apply(s => ({ ...s, half: k, status: 'in' }))}>{l}</button>
+            ))}
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6, flexWrap: 'wrap' }}>
+            <span style={label}>OUTS</span>
+            {[0, 1, 2].map(o => (
+              <button key={o} style={{ ...cfbChip(st.outs === o && live), flex: 'none', width: 34, padding: '5px 0' }} onClick={() => apply(s => ({ ...s, outs: o, status: 'in' }))}>{o}</button>
+            ))}
+            <button onClick={advance} disabled={final} style={{ ...cfbChip(!final, '#22c55e'), flex: 1, padding: '6px 0', opacity: final ? 0.5 : 1 }}>
+              3rd out ▸ {nextLabel()}
+            </button>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+            <span style={label}>RUNS {mlbOrd(st.inning)}</span>
+            {runBtns('away', away)}
+            {runBtns('home', home)}
+            <button style={{ ...cfbChip(final, '#ef4444'), flex: 'none', width: 54, padding: '5px 0', marginLeft: 'auto' }}
+              onClick={() => apply(s => ({ ...s, status: final ? 'in' : 'post' }))}>Final</button>
+          </div>
+        </>
+      )}
     </div>
   )
 }
@@ -3893,7 +3980,7 @@ function MLBBoardTab() {
   const [games, setGames] = useState([])
   const [game, setGame] = useState(() => { try { return localStorage.getItem(MLB_GAME_KEY) || '' } catch { return '' } })
   const [snap, setSnap] = useState(null)
-  const [st, setSt] = useState(null)
+  const [sc, setSc] = useState(null)         // hand-kept score, see MLBScoreKeeper
   const [err, setErr] = useState('')
   const [live, setLive] = useState({})        // ticker -> { yes_bid, yes_ask } (0-1, from WS)
   const [wsUp, setWsUp] = useState(false)
@@ -3929,11 +4016,21 @@ function MLBBoardTab() {
 
   const pickGame = (key) => {
     if (key === game) return
-    setGame(key); setSnap(null); setSt(null); setLive({}); setSel(null); setSweep(null)
+    setGame(key); setSnap(null); setLive({}); setSel(null); setSweep(null)
     setResult(null); setSweepResult(null); setOpen({}); setErr('')
   }
 
-  // Markets every 30s (new / closed markets), the linescore every 4s, prices over the socket
+  // The score is per game, saved in this browser
+  useEffect(() => {
+    if (!game) return
+    try { const saved = JSON.parse(localStorage.getItem(MLB_SCORE_KEY(game))); setSc(saved?.innings ? saved : null) } catch { setSc(null) }
+  }, [game])
+  useEffect(() => {
+    if (!game) return
+    try { if (sc) localStorage.setItem(MLB_SCORE_KEY(game), JSON.stringify(sc)); else localStorage.removeItem(MLB_SCORE_KEY(game)) } catch {}
+  }, [sc, game])
+
+  // Markets every 30s (new / closed markets), prices over the socket
   useEffect(() => {
     if (!game) return
     let alive = true
@@ -3943,16 +4040,6 @@ function MLBBoardTab() {
     }).catch(e => alive && setErr(e.message))
     load()
     const t = setInterval(load, 30000)
-    return () => { alive = false; clearInterval(t) }
-  }, [game])
-
-  useEffect(() => {
-    if (!game) return
-    let alive = true
-    const load = () => fetch(`${API}/api/mlb/board/state?game=${game}`).then(r => r.json())
-      .then(d => { if (alive && d.status) setSt(d) }).catch(() => {})
-    load()
-    const t = setInterval(load, 4000)
     return () => { alive = false; clearInterval(t) }
   }, [game])
 
@@ -4016,7 +4103,7 @@ function MLBBoardTab() {
 
   const groups = snap ? snap.groups.map(g => ({ ...g, markets: g.markets.map(withLive) })) : []
   const teams = snap ? [snap.away.code, snap.home.code] : []
-  const state = st && st.teams ? st : { status: 'pre', inning: 0, half: 'top', outs: 0, runs: { away: 0, home: 0 }, innings: [], teams: { away: teams[0], home: teams[1] } }
+  const state = mlbScoreState(sc, teams)
   const locks = mlbLocks(groups, state)
   const pregame = state.status === 'pre'
   const innings = groups.filter(g => g.inning != null).map(g => g.inning)
@@ -4148,7 +4235,7 @@ function MLBBoardTab() {
 
       <MLBGamePicker games={games} value={game} onSelect={pickGame} />
 
-      {snap && <MLBScorebug st={st} away={snap.away.code} home={snap.home.code} />}
+      {snap && <MLBScoreKeeper sc={sc} setSc={setSc} away={snap.away.code} home={snap.home.code} />}
 
       {snap && (
         <>
@@ -4167,8 +4254,8 @@ function MLBBoardTab() {
             </button>
           </div>
           <div style={{ fontSize: 10, color: '#475569', marginBottom: 10 }}>
-            {pregame ? 'Sweeps unlock at first pitch. Inning markets close about a minute after their inning ends.'
-              : `${nLocked} markets decided by the linescore. Inning markets close about a minute after their inning ends.`}
+            {pregame ? 'Sweeps unlock once you tap First pitch. Inning markets close about a minute after their inning ends.'
+              : `${nLocked} markets decided by your score. Inning markets close about a minute after their inning ends.`}
           </div>
         </>
       )}
