@@ -1467,7 +1467,7 @@ async def kalshi_game_tickers(home_team: str = "", away_team: str = ""):
 # ---------------------------------------------------------------------------
 
 @app.websocket("/api/ws/kalshi")
-async def kalshi_ws_proxy(websocket: WebSocket, ticker: str = "", game_key: str = "", cfb_game: str = "", mlb_game: str = ""):
+async def kalshi_ws_proxy(websocket: WebSocket, ticker: str = "", game_key: str = "", cfb_game: str = "", mlb_game: str = "", nhl_game: str = ""):
     """Subscribe to both sides of a Kalshi game and stream price updates.
 
     Pass either:
@@ -1478,6 +1478,8 @@ async def kalshi_ws_proxy(websocket: WebSocket, ticker: str = "", game_key: str 
         → subscribes to every open market in /api/cfb/markets for that game
       - mlb_game: an MLB board game key (e.g. 26SEP151840CWSCLE)
         → subscribes to every open market in /api/mlb/board/markets for that game
+      - nhl_game: an NHL board game code (e.g. 26SEP30NYITOR)
+        → subscribes to every open market in /api/nhl/markets for that game
     """
     await websocket.accept()
 
@@ -1507,6 +1509,17 @@ async def kalshi_ws_proxy(websocket: WebSocket, ticker: str = "", game_key: str 
         if _CFB_GAME_RE.match(cfb_game):
             try:
                 snap = await _cfb_snapshot(cfb_game)
+            except Exception:
+                snap = {}
+            for g in snap.get("groups", []):
+                for m in g["markets"]:
+                    tickers.append(m["ticker"])
+                    ticker_team_map[m["ticker"]] = m["ticker"]
+    elif nhl_game:
+        nhl_game = nhl_game.upper()
+        if _NHL_GAME_RE.match(nhl_game):
+            try:
+                snap = await _nhl_snapshot(nhl_game)
             except Exception:
                 snap = {}
             for g in snap.get("groups", []):
@@ -2426,6 +2439,186 @@ async def cfb_sweep_execute(req: CfbSweepRequest):
             "errors": [o["error"][:200] for o in orders if not o["ok"]][:3],
         },
     }
+
+
+# ---------------------------------------------------------------------------
+# NHL game board (Leafs): every Kalshi market for one game, hand-scored
+# ---------------------------------------------------------------------------
+# Same shape as the CFB board: Kalshi has no "all events for a game" call, so
+# each NHL series is probed for {series}-{game}. Game codes are yyMONdd plus
+# the away and home team codes, e.g. 26SEP30NYITOR. Player props (goalscorer,
+# saves, points) are deliberately left off the board.
+NHL_TEAM = "TOR"
+_NHL_GAME_RE = re.compile(r"^\d{2}[A-Z]{3}\d{2}[A-Z]{4,8}$")
+NHL_BOARD_SERIES = [
+    ("KXNHLGAME", "Moneyline"), ("KXNHLSPREAD", "Puck line"), ("KXNHLTOTAL", "Total goals"),
+    ("KXNHLTEAMTOTAL", "Team totals"), ("KXNHLOT", "Overtime"), ("KXNHLOVERTIME", "Overtime"),
+    ("KXNHL2OT", "Double overtime"), ("KXNHLF10G", "Goal in first 10 min"),
+    ("KXNHL1P", "1st period winner"), ("KXNHL1PSPREAD", "1st period spread"), ("KXNHL1PTOTAL", "1st period total"), ("KXNHL1PBTTS", "1st period both score"),
+    ("KXNHL2P", "2nd period winner"), ("KXNHL2PSPREAD", "2nd period spread"), ("KXNHL2PTOTAL", "2nd period total"), ("KXNHL2PBTTS", "2nd period both score"),
+    ("KXNHL3P", "3rd period winner"), ("KXNHL3PSPREAD", "3rd period spread"), ("KXNHL3PTOTAL", "3rd period total"), ("KXNHL3PBTTS", "3rd period both score"),
+]
+_NHL_SERIES_TITLE = dict(NHL_BOARD_SERIES)
+_NHL_SERIES_ORDER = {s: i for i, (s, _) in enumerate(NHL_BOARD_SERIES)}
+_NHL_SERIES_TTL = 900.0
+_NHL_SNAPSHOT_TTL = 10.0
+_NHL_GAMES_TTL = 120.0
+_nhl_series_cache = {}     # game -> {"at": float, "series": [tickers]}
+_nhl_snapshot_cache = {}   # game -> {"at": float, "data": dict}
+_nhl_games_cache = {"at": 0.0, "games": [], "team": None}
+_nhl_lock = asyncio.Lock()
+
+
+async def _nhl_find_series(client, game: str) -> list:
+    """Which board series have an event for this game."""
+    cached = _nhl_series_cache.get(game)
+    if cached and time.time() - cached["at"] < _NHL_SERIES_TTL:
+        return cached["series"]
+    found, unsure = [], 0
+    sem = asyncio.Semaphore(6)
+
+    async def probe(series: str):
+        nonlocal unsure
+        async with sem:
+            rr = await _cfb_get(client, f"{KALSHI_API_BASE}/events/{series}-{game}")
+        if rr.status_code == 200:
+            found.append(series)
+        elif rr.status_code != 404:
+            unsure += 1
+
+    await asyncio.gather(*(probe(s) for s, _ in NHL_BOARD_SERIES))
+    found.sort(key=lambda s: _NHL_SERIES_ORDER[s])
+    if found:
+        at = time.time() - (_NHL_SERIES_TTL - 60 if unsure else 0)
+        _nhl_series_cache[game] = {"at": at, "series": found}
+    return found
+
+
+async def _nhl_snapshot(game: str) -> dict:
+    async with _nhl_lock:
+        cached = _nhl_snapshot_cache.get(game)
+        if cached and time.time() - cached["at"] < _NHL_SNAPSHOT_TTL:
+            return cached["data"]
+        import httpx
+        async with httpx.AsyncClient(timeout=15.0, headers={"accept": "application/json"}) as client:
+            series = await _nhl_find_series(client, game)
+            sem = asyncio.Semaphore(6)
+
+            async def load(s: str):
+                async with sem:
+                    r = await _cfb_get(client, f"{KALSHI_API_BASE}/events/{s}-{game}", {"with_nested_markets": "true"})
+                if r.status_code != 200:
+                    return s, None, []
+                body = r.json()
+                ev = body.get("event") or {}
+                return s, ev, body.get("markets") or ev.get("markets") or []
+
+            results = await asyncio.gather(*(load(s) for s in series))
+
+        prev = {g["series"]: g for g in (cached["data"]["groups"] if cached else [])}
+        title, groups = None, []
+        for s, ev, markets in results:
+            if ev is None:
+                if s in prev:
+                    groups.append(prev[s])
+                continue
+            if s == "KXNHLGAME" or title is None:
+                title = (ev.get("title") or "").split(":")[0] or title
+            live = [_cfb_market(m) for m in markets if m.get("status") in ("active", "open")]
+            if not live:
+                continue
+            live.sort(key=_cfb_market_sort_key)
+            groups.append({"series": s, "event_ticker": f"{s}-{game}", "title": _NHL_SERIES_TITLE.get(s, s), "markets": live})
+        groups.sort(key=lambda g: _NHL_SERIES_ORDER.get(g["series"], 99))
+        data = {
+            "game": game,
+            "title": title or game,
+            "away": game[7:10], "home": game[10:],
+            "groups": groups,
+            "market_count": sum(len(g["markets"]) for g in groups),
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
+        }
+        _nhl_snapshot_cache[game] = {"at": time.time(), "data": data}
+        return data
+
+
+def _nhl_code_date(code: str):
+    """26SEP30NYITOR -> date(2026, 9, 30) or None."""
+    try:
+        return datetime(2000 + int(code[:2]), _MLB_MONTHS[code[2:5]], int(code[5:7])).date()
+    except (ValueError, KeyError):
+        return None
+
+
+@app.get("/api/nhl/games")
+async def nhl_games(team: str = NHL_TEAM):
+    """Upcoming Kalshi NHL games for one team (open moneyline events), soonest first."""
+    team = team.upper()
+    now = time.time()
+    if now - _nhl_games_cache["at"] > _NHL_GAMES_TTL or _nhl_games_cache.get("team") != team:
+        import httpx
+        games = []
+        try:
+            async with httpx.AsyncClient(timeout=15.0, headers={"accept": "application/json"}) as client:
+                cursor = None
+                for _ in range(5):
+                    params = {"series_ticker": "KXNHLGAME", "status": "open", "limit": 200}
+                    if cursor:
+                        params["cursor"] = cursor
+                    r = await _cfb_get(client, f"{KALSHI_API_BASE}/events", params)
+                    if r.status_code != 200:
+                        break
+                    body = r.json()
+                    for ev in body.get("events", []):
+                        code = ev.get("event_ticker", "").split("-")[-1]
+                        if not _NHL_GAME_RE.match(code):
+                            continue
+                        away, home = code[7:10], code[10:]
+                        if team not in (away, home):
+                            continue
+                        d = _nhl_code_date(code)
+                        games.append({"code": code, "title": ev.get("title") or code, "date": d.isoformat() if d else None, "away": away, "home": home})
+                    cursor = body.get("cursor")
+                    if not cursor:
+                        break
+        except Exception as e:
+            return {"error": str(e), "games": _nhl_games_cache["games"]}
+        games.sort(key=lambda g: g["date"] or "9999")
+        _nhl_games_cache.update({"at": now, "games": games, "team": team})
+    try:
+        from zoneinfo import ZoneInfo
+        today = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+    except Exception:
+        today = datetime.now(timezone.utc).date().isoformat()
+    return {"team": team, "today": today, "games": _nhl_games_cache["games"]}
+
+
+@app.get("/api/nhl/markets")
+async def nhl_markets(game: str):
+    """Every open Kalshi market for one NHL game, grouped by market type."""
+    game = game.upper()
+    if not _NHL_GAME_RE.match(game):
+        return {"error": "bad game code", "groups": []}
+    try:
+        return await _nhl_snapshot(game)
+    except Exception as e:
+        return {"error": str(e), "groups": []}
+
+
+class NhlPositionsRequest(BaseModel):
+    trade_token: str
+    game: str
+
+
+@app.post("/api/nhl/positions")
+async def nhl_positions(req: NhlPositionsRequest):
+    """Signed Kalshi positions on this game's markets. Gated by the trade token."""
+    if not _verify_trade_token(req.trade_token):
+        return {"ok": False, "error": "Unauthorized"}
+    game = req.game.upper()
+    if not _NHL_GAME_RE.match(game):
+        return {"ok": False, "error": "bad game code"}
+    return await _kalshi_positions_for_game(game)
 
 
 # ---------------------------------------------------------------------------

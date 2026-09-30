@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useEffect } from 'react'
+import { useState, useCallback, useRef, useEffect, useMemo } from 'react'
 import { mlbLocks, mlbInningLegs, mlbGameLegs } from './mlbRules.js'
 
 const API = window.location.hostname === 'localhost'
@@ -744,13 +744,14 @@ function SpringOddsTab() {
 }
 
 // Derive WebSocket base URL from current host
-function getKalshiWsUrl({ ticker, gameKey, cfbGame, mlbGame } = {}) {
+function getKalshiWsUrl({ ticker, gameKey, cfbGame, mlbGame, nhlGame } = {}) {
   const isLocal = window.location.hostname === 'localhost'
   const base = isLocal
     ? 'ws://localhost:8000'
     : 'wss://mlb-simulator-api.onrender.com'
   if (cfbGame) return `${base}/api/ws/kalshi?cfb_game=${encodeURIComponent(cfbGame)}`
   if (mlbGame) return `${base}/api/ws/kalshi?mlb_game=${encodeURIComponent(mlbGame)}`
+  if (nhlGame) return `${base}/api/ws/kalshi?nhl_game=${encodeURIComponent(nhlGame)}`
   if (gameKey) return `${base}/api/ws/kalshi?game_key=${encodeURIComponent(gameKey)}`
   return `${base}/api/ws/kalshi?ticker=${encodeURIComponent(ticker)}`
 }
@@ -3725,6 +3726,656 @@ function CFBTab() {
   )
 }
 
+// ── NHL game board (Leafs): every Kalshi market for one game, hand-scored ────
+// Reuses the CFB board's pieces (market rows, order ticket, sweep panel, sweep
+// engine at /api/sweep/*). New here: an NHL score keeper (goals by period, OT
+// and SO one goal at most), NHL lock rules, a period/game sweeper that adds the
+// moneyline, and two "goal-jump" cards that buy a team's moneyline the moment
+// they score, up to a target win% minus an edge buffer.
+const NHL_TEAM = 'TOR'
+const NHL_SCORE_PREFIX = 'nhl_score_'
+const NHL_DEFAULT_OPEN = new Set(['KXNHLGAME', 'KXNHLSPREAD', 'KXNHLTOTAL', 'KXNHLTEAMTOTAL'])
+const NHL_COLS = ['P1', 'P2', 'P3', 'OT', 'SO']
+// Game phases for the hand-kept score. `scoreIn` is the column a goal lands in.
+const NHL_PHASES = [
+  { key: 'pre', label: 'Pregame', period: 0, scoreIn: 0 },
+  { key: 'p1', label: '1st period', period: 1, scoreIn: 0 },
+  { key: 'e1', label: '1st intermission', period: 1, end: true, scoreIn: 1 },
+  { key: 'p2', label: '2nd period', period: 2, scoreIn: 1 },
+  { key: 'e2', label: '2nd intermission', period: 2, end: true, scoreIn: 2 },
+  { key: 'p3', label: '3rd period', period: 3, scoreIn: 2 },
+  { key: 'e3', label: 'End of regulation', period: 3, end: true, scoreIn: 3 },
+  { key: 'ot', label: 'Overtime', period: 4, scoreIn: 3 },
+  { key: 'so', label: 'Shootout', period: 5, scoreIn: 4 },
+  { key: 'final', label: 'Final', period: 5, final: true, scoreIn: null },
+]
+// Sweeper periods: [series infix, label, columns counted (null = whole game incl. OT/SO)]
+const NHL_PERIODS = [['GAME', 'Game', null], ['1P', 'P1', [1]], ['2P', 'P2', [2]], ['3P', 'P3', [3]]]
+const nhlBlank = (teams) => ({ phase: 'pre', lines: Object.fromEntries(teams.map(t => [t, [0, 0, 0, 0, 0]])) })
+
+// Goals a team scored in the given periods (null = whole game, OT and SO included)
+const nhlGoals = (gs, team, periods) => periods
+  ? periods.reduce((s, p) => s + (gs.lines[team]?.[p - 1] || 0), 0)
+  : (gs.lines[team] || []).reduce((a, b) => a + (Number(b) || 0), 0)
+
+function nhlGameState(sc, teams) {
+  const ph = NHL_PHASES.find(p => p.key === sc.phase) || NHL_PHASES[0]
+  const lines = Object.fromEntries(teams.map(t => [t, sc.lines[t] || [0, 0, 0, 0, 0]]))
+  return {
+    state: ph.key === 'pre' ? 'pre' : ph.final ? 'post' : 'in',
+    period: ph.period, ended: !!ph.end, final: !!ph.final, lines, teams,
+    scores: Object.fromEntries(teams.map(t => [t, nhlGoals({ lines }, t, null)])),
+  }
+}
+
+// Which side of each market the score has already decided -> { ticker: 'yes'|'no' }.
+// Period markets count only their own goals; game lines include OT and the
+// shootout, which counts as one goal for the winner.
+function nhlLocks(groups, gs) {
+  const locks = {}
+  if (gs.state === 'pre') return locks
+  const final = gs.state === 'post'
+  const periodDone = (n) => final || gs.period > n || (gs.period === n && gs.ended)
+  const teams = gs.teams
+  for (const g of groups) {
+    const kind = g.series.replace(/^KXNHL/, '')
+    const per = kind.match(/^([1-3])P/)
+    const periods = per ? [Number(per[1])] : null
+    const done = periods ? periodDone(periods[0]) : final
+    const base = kind.replace(/^[1-3]P/, '') || 'GAME'   // bare "1P" is the period winner
+    for (const m of g.markets) {
+      const suffix = m.ticker.split('-').pop()
+      const team = suffix.replace(/\d+$/, '')
+      const other = teams.find(t => t !== team)
+      const known = teams.includes(team)
+      const total = teams.reduce((s, t) => s + nhlGoals(gs, t, periods), 0)
+      let lock = null
+      if (base === 'TOTAL') {
+        if (total > m.strike) lock = 'yes'
+        else if (done) lock = 'no'
+      } else if (base === 'TEAMTOTAL' && known) {
+        if (nhlGoals(gs, team, periods) > m.strike) lock = 'yes'
+        else if (done) lock = 'no'
+      } else if (base === 'SPREAD' && known) {
+        if (done) lock = nhlGoals(gs, team, periods) - nhlGoals(gs, other, periods) > m.strike ? 'yes' : 'no'
+      } else if (base === 'GAME') {
+        if (done) {
+          const [a, b] = teams
+          const ga = nhlGoals(gs, a, periods), gb = nhlGoals(gs, b, periods)
+          lock = suffix === (ga === gb ? 'TIE' : ga > gb ? a : b) ? 'yes' : 'no'
+        }
+      } else if (base === 'BTTS') {
+        if (teams.every(t => nhlGoals(gs, t, periods) > 0)) lock = 'yes'
+        else if (done) lock = 'no'
+      } else if (base === 'OT' || base === 'OVERTIME') {
+        if (gs.period >= 4) lock = 'yes'
+        else if (final) lock = 'no'
+      }
+      if (lock) locks[m.ticker] = lock
+    }
+  }
+  return locks
+}
+
+// The sweeper for one period: the winner market for `team` once they lead by
+// mlCushion (YES), spread lines covered by spreadCushion (YES) and the other
+// side's lines that many goals from flipping (NO), totals passed (YES) and
+// totals still totalCushion goals away (NO).
+function nhlComboLegs(groups, gs, cfg) {
+  const [key, , periods] = NHL_PERIODS.find(p => p[0] === cfg.period)
+  const prefix = key === 'GAME' ? 'KXNHL' : `KXNHL${key}`
+  const markets = (s) => groups.find(g => g.series === prefix + s)?.markets || []
+  const other = gs.teams.find(t => t !== cfg.team)
+  const margin = nhlGoals(gs, cfg.team, periods) - nhlGoals(gs, other, periods)
+  const total = gs.teams.reduce((s, t) => s + nhlGoals(gs, t, periods), 0)
+  const legs = []
+  for (const m of markets(key === 'GAME' ? 'GAME' : '')) {
+    const suffix = m.ticker.split('-').pop()
+    if (cfg.mlYes && suffix === cfg.team && margin >= cfg.mlCushion) legs.push({ m, side: 'yes', kind: 'ML' })
+  }
+  for (const m of markets('SPREAD')) {
+    if (m.strike == null) continue
+    const team = m.ticker.split('-').pop().replace(/\d+$/, '')
+    if (team === cfg.team && cfg.spreadYes && margin - m.strike >= cfg.spreadCushion) legs.push({ m, side: 'yes', kind: 'SPR' })
+    else if (team === other && cfg.spreadNo && margin + m.strike >= cfg.spreadCushion) legs.push({ m, side: 'no', kind: 'SPR' })
+  }
+  for (const m of markets('TOTAL')) {
+    if (m.strike == null) continue
+    if (cfg.totalYes && total > m.strike) legs.push({ m, side: 'yes', kind: 'TOT' })
+    else if (cfg.totalNo && m.strike - total >= cfg.totalCushion) legs.push({ m, side: 'no', kind: 'TOT' })
+  }
+  const first = periods ? periods[0] : 1
+  const started = gs.state !== 'pre' && gs.period >= first
+  return { legs, margin, total, other, started }
+}
+
+function NHLComboControls({ sweep, setSweep, combo, teams }) {
+  const set = (patch) => setSweep({ ...sweep, ...patch })
+  return (
+    <div style={{ marginBottom: 8 }}>
+      <div style={{ display: 'flex', gap: 4, marginBottom: 6 }}>
+        {NHL_PERIODS.map(([key, label]) => (
+          <button key={key} style={{ ...cfbChip(sweep.period === key), padding: '5px 0' }} onClick={() => set({ period: key })}>{label}</button>
+        ))}
+      </div>
+      <div style={{ fontSize: 11, color: '#94a3b8', marginBottom: 6 }}>
+        {sweep.team} {combo.margin >= 0 ? '+' : ''}{combo.margin} · total {combo.total}
+        {!combo.started && <span style={{ color: '#f59e0b' }}> · this period hasn't started, so nothing here is covered yet</span>}
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6, flexWrap: 'wrap' }}>
+        <span style={sweepRowLabel}>TEAM</span>
+        {teams.map(t => (
+          <button key={t} style={{ ...cfbChip(sweep.team === t), flex: 'none', width: 48, padding: '5px 0' }} onClick={() => set({ team: t })}>{t}</button>
+        ))}
+        <span style={{ ...sweepRowLabel, width: 'auto' }}>ML</span>
+        <SweepStepper value={sweep.mlCushion} onChange={v => set({ mlCushion: v })} min={0} unit=" up" />
+        <SweepCheck cfg={sweep} set={set} k="mlYes" label={`YES ${sweep.team} win`} />
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6, flexWrap: 'wrap' }}>
+        <span style={sweepRowLabel}>SPREAD</span>
+        <SweepStepper value={sweep.spreadCushion} onChange={v => set({ spreadCushion: v })} min={0} unit=" g" />
+        <SweepCheck cfg={sweep} set={set} k="spreadYes" label={`YES ${sweep.team}`} />
+        <SweepCheck cfg={sweep} set={set} k="spreadNo" label={`NO ${combo.other}`} />
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+        <span style={sweepRowLabel}>TOTAL</span>
+        <SweepStepper value={sweep.totalCushion} onChange={v => set({ totalCushion: v })} min={0} unit=" g" />
+        <SweepCheck cfg={sweep} set={set} k="totalYes" label="YES passed" />
+        <SweepCheck cfg={sweep} set={set} k="totalNo" label="NO unders" />
+      </div>
+    </div>
+  )
+}
+
+// Hand-kept score: goals by period plus OT and SO, and where the game is.
+function NHLScoreKeeper({ sc, setSc, teams }) {
+  const [history, setHistory] = useState([])
+  const [armReset, setArmReset] = useState(false)
+  const idx = Math.max(0, NHL_PHASES.findIndex(p => p.key === sc.phase))
+  const ph = NHL_PHASES[idx]
+  const tot = (t) => (sc.lines[t] || []).reduce((a, b) => a + b, 0)
+  const tied = tot(teams[0]) === tot(teams[1])
+  const liveCol = ph.final || ph.key === 'pre' ? -1 : ph.period - 1
+
+  const goTo = (key) => setSc(s => ({ ...s, phase: key }))
+  const forward = () => {
+    if (ph.key === 'e3') goTo(tied ? 'ot' : 'final')
+    else if (ph.key === 'ot') goTo(tied ? 'so' : 'final')
+    else if (ph.key === 'so') goTo('final')
+    else if (!ph.final) goTo(NHL_PHASES[idx + 1].key)
+  }
+  const back = () => {
+    if (ph.key === 'final') goTo(sc.lines[teams[0]][4] || sc.lines[teams[1]][4] ? 'so' : sc.lines[teams[0]][3] || sc.lines[teams[1]][3] ? 'ot' : 'e3')
+    else if (idx > 0) goTo(NHL_PHASES[idx - 1].key)
+  }
+  // A goal during an intermission starts the next period; an OT or SO goal ends the game.
+  const goal = (team) => {
+    if (ph.scoreIn == null) return
+    const col = ph.scoreIn
+    const next = col >= 3 ? 'final' : ['p1', 'p2', 'p3'][col]   // a goal in P1-P3 means that period is live
+    setHistory(h => [...h, { team, col, phase: sc.phase }])
+    setSc(s => ({
+      ...s, phase: next || s.phase,
+      lines: { ...s.lines, [team]: s.lines[team].map((v, i) => (i === col ? v + 1 : v)) },
+    }))
+  }
+  const undo = () => {
+    const last = history[history.length - 1]
+    if (!last) return
+    setHistory(h => h.slice(0, -1))
+    setSc(s => ({ ...s, phase: last.phase, lines: { ...s.lines, [last.team]: s.lines[last.team].map((v, i) => (i === last.col ? Math.max(0, v - 1) : v)) } }))
+  }
+  const setCell = (team, i, v) => setSc(s => ({ ...s, lines: { ...s.lines, [team]: s.lines[team].map((x, j) => (j === i ? Math.max(0, Math.min(i >= 3 ? 1 : 20, v)) : x)) } }))
+  const reset = () => {
+    if (!armReset) { setArmReset(true); setTimeout(() => setArmReset(false), 3000); return }
+    setArmReset(false); setHistory([]); setSc(nhlBlank(teams))
+  }
+  const cols = '46px repeat(5, 1fr) 30px'
+  const cell = (active) => ({
+    width: '100%', padding: '4px 0', borderRadius: 6, textAlign: 'center', fontSize: 14, fontWeight: 700,
+    background: '#0f172a', color: '#f1f5f9', outline: 'none', border: `1px solid ${active ? '#f59e0b' : '#334155'}`,
+  })
+  return (
+    <div style={{ background: '#1e293b', borderRadius: 12, padding: 12, marginBottom: 10, border: '1px solid #f59e0b44' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+        <button style={cfbMiniBtn} disabled={idx === 0} onClick={back}>◀</button>
+        <div style={{ textAlign: 'center', minWidth: 120 }}>
+          <div style={{ fontSize: 9, color: '#475569' }}>GAME STATE</div>
+          <div style={{ fontSize: 15, fontWeight: 800, color: '#f59e0b' }}>{ph.label}</div>
+        </div>
+        <button style={cfbMiniBtn} disabled={ph.final} onClick={forward}>▶</button>
+        <div style={{ marginLeft: 'auto', display: 'flex', gap: 12, fontSize: 11 }}>
+          <span onClick={undo} style={{ color: history.length ? '#3b82f6' : '#334155', cursor: history.length ? 'pointer' : 'default' }}>undo</span>
+          <span onClick={reset} style={{ color: armReset ? '#ef4444' : '#475569', cursor: 'pointer' }}>{armReset ? 'tap to reset' : 'reset'}</span>
+        </div>
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: cols, gap: 4, alignItems: 'center', fontSize: 10, color: '#475569', marginBottom: 4 }}>
+        <span />
+        {NHL_COLS.map((c, i) => (
+          <span key={c} style={{ textAlign: 'center', color: i === liveCol ? '#f59e0b' : '#475569', fontWeight: i === liveCol ? 800 : 400 }}>{c}</span>
+        ))}
+        <span style={{ textAlign: 'center' }}>T</span>
+      </div>
+      {teams.map(t => (
+        <div key={t} style={{ display: 'grid', gridTemplateColumns: cols, gap: 4, alignItems: 'center', marginBottom: 4 }}>
+          <span style={{ fontSize: 13, fontWeight: 800, color: t === NHL_TEAM ? '#3b82f6' : '#e2e8f0' }}>{t}</span>
+          {(sc.lines[t] || [0, 0, 0, 0, 0]).map((v, i) => (
+            <input key={i} type="number" inputMode="numeric" value={v} style={cell(i === liveCol)}
+              onChange={e => setCell(t, i, Number(e.target.value) || 0)} />
+          ))}
+          <span style={{ textAlign: 'center', fontSize: 17, fontWeight: 900, color: '#f1f5f9' }}>{tot(t)}</span>
+        </div>
+      ))}
+      <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+        {teams.map(t => (
+          <button key={t} disabled={ph.scoreIn == null} onClick={() => goal(t)} style={{
+            ...cfbChip(false, '#22c55e'), padding: '9px 0', color: '#22c55e', fontSize: 13, opacity: ph.scoreIn == null ? 0.4 : 1,
+          }}>🚨 {t} GOAL</button>
+        ))}
+      </div>
+      <div style={{ fontSize: 10, color: '#475569', marginTop: 4 }}>
+        A goal lands in {ph.scoreIn != null ? NHL_COLS[ph.scoreIn] : '—'}; scoring during an intermission starts the next period, and an OT or SO goal ends the game (one goal at most). Tap a cell to fix a number.
+      </div>
+    </div>
+  )
+}
+
+// Two cards, one per team: the moment they score, swipe to buy their moneyline
+// up to (target win% − buffer), cheapest asks first, within the budget. Both
+// stay armed all game. Target defaults to the live price + 10 the first time a
+// price is seen; everything is adjustable.
+function NHLGoalJump({ teams, mlByTeam, token, onUnlock, onLock }) {
+  const [cfg, setCfg] = useState(() => Object.fromEntries(teams.map(t => [t, { target: null, buffer: 3, budget: 100 }])))
+  const [books, setBooks] = useState({})
+  const [busy, setBusy] = useState(null)
+  const [result, setResult] = useState({})
+  const tickers = teams.map(t => mlByTeam[t]?.ticker).filter(Boolean).join(',')
+
+  useEffect(() => {
+    if (!tickers) return
+    let alive = true
+    const load = () => Promise.all(tickers.split(',').map(t => fetch(`${API}/api/kalshi/orderbook/${t}`).then(r => r.json()).catch(() => null)))
+      .then(all => { if (alive) setBooks(Object.fromEntries(all.filter(b => b && !b.error).map(b => [b.ticker, b]))) })
+    load()
+    const id = setInterval(load, 3000)
+    return () => { alive = false; clearInterval(id) }
+  }, [tickers])
+
+  // First price seen sets the default target (mid + 10)
+  useEffect(() => {
+    setCfg(c => {
+      let changed = false
+      const next = { ...c }
+      for (const t of teams) {
+        const m = mlByTeam[t]
+        if (next[t].target == null && m && m.yes_ask != null) {
+          const mid = m.yes_bid != null ? Math.round((m.yes_bid + m.yes_ask) / 2) : m.yes_ask
+          next[t] = { ...next[t], target: Math.min(99, mid + 10) }
+          changed = true
+        }
+      }
+      return changed ? next : c
+    })
+  }, [mlByTeam, teams])
+
+  const set = (t, patch) => setCfg(c => ({ ...c, [t]: { ...c[t], ...patch } }))
+  const fire = async (t) => {
+    const m = mlByTeam[t]; const c = cfg[t]
+    if (!m || !token || c.target == null) return
+    const ceiling = Math.max(1, Math.min(99, c.target - c.buffer))
+    setBusy(t); setResult(r => ({ ...r, [t]: null }))
+    try {
+      const r = await fetch(`${API}/api/trade/execute`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ticker: m.ticker, side: 'yes', max_price_cents: ceiling, max_spend_cents: Math.round(c.budget * 100), trade_token: token }),
+      })
+      const d = await r.json()
+      setResult(res => ({ ...res, [t]: d }))
+      if (d?.error === 'Unauthorized') { onLock(); onUnlock() }
+    } catch (e) { setResult(res => ({ ...res, [t]: { ok: false, error: e.message } })) }
+    finally { setBusy(null) }
+  }
+
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 10 }}>
+      {teams.map(t => {
+        const m = mlByTeam[t]; const c = cfg[t]; const ob = m && books[m.ticker]
+        const ceiling = c.target == null ? null : Math.max(1, Math.min(99, c.target - c.buffer))
+        const plan = ob && ceiling != null ? cfbSweep(sideLadder(ob, 'yes').asks, ceiling, Math.round(c.budget * 100)) : null
+        const color = t === NHL_TEAM ? '#3b82f6' : '#22c55e'
+        const res = result[t]
+        return (
+          <div key={t} style={{ background: '#1e293b', borderRadius: 12, padding: 10, border: `1px solid ${color}55` }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+              <span style={{ fontSize: 14, fontWeight: 900, color }}>{t} ML</span>
+              <span style={{ fontSize: 12, color: '#94a3b8' }}>{m?.yes_bid ?? '—'} / <b style={{ color: '#e2e8f0' }}>{m?.yes_ask ?? '—'}¢</b></span>
+            </div>
+            <div style={{ fontSize: 9, color: '#475569', marginTop: 6 }}>WIN% IF THEY SCORE</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+              <button style={cfbMiniBtn} onClick={() => set(t, { target: Math.max(1, (c.target ?? 50) - 1) })}>−</button>
+              <b style={{ flex: 1, textAlign: 'center', fontSize: 22, color }}>{c.target ?? '—'}</b>
+              <button style={cfbMiniBtn} onClick={() => set(t, { target: Math.min(99, (c.target ?? 50) + 1) })}>+</button>
+            </div>
+            <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 6, fontSize: 11, color: '#94a3b8' }}>
+              <span>buffer</span>
+              <button style={{ ...cfbMiniBtn, width: 22, height: 22, fontSize: 12 }} onClick={() => set(t, { buffer: Math.max(0, c.buffer - 1) })}>−</button>
+              <b style={{ color: '#e2e8f0' }}>{c.buffer}¢</b>
+              <button style={{ ...cfbMiniBtn, width: 22, height: 22, fontSize: 12 }} onClick={() => set(t, { buffer: Math.min(20, c.buffer + 1) })}>+</button>
+              <span style={{ marginLeft: 'auto' }}>$</span>
+              <input value={c.budget} onChange={e => set(t, { budget: Number(e.target.value) || 0 })} type="number" inputMode="decimal"
+                style={{ width: 52, padding: '3px 5px', borderRadius: 6, background: '#0f172a', border: '1px solid #334155', color: '#f1f5f9', fontSize: 12, outline: 'none' }} />
+            </div>
+            <div style={{ fontSize: 11, color: '#94a3b8', margin: '6px 0', minHeight: 28 }}>
+              buys ≤ <b style={{ color: '#e2e8f0' }}>{ceiling ?? '—'}¢</b>
+              {plan ? (plan.contracts ? <> · ≈ <b style={{ color: '#e2e8f0' }}>{plan.contracts}</b> @ {(plan.cost / plan.contracts).toFixed(1)}¢ · ${(plan.cost / 100).toFixed(0)} now</> : <> · nothing on the book ≤{ceiling}¢ right now</>) : ''}
+            </div>
+            {token
+              ? <SlideToConfirm color={color} busy={busy === t} disabled={!m || ceiling == null || busy != null}
+                  label={`${t} SCORED →`} onConfirm={() => fire(t)} />
+              : <button onClick={onUnlock} style={{ width: '100%', height: 40, borderRadius: 20, border: '1px solid #f59e0b55', background: '#0f172a', color: '#f59e0b', fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>Unlock trading</button>}
+            {res && (
+              <div style={{ marginTop: 6, fontSize: 11 }}>
+                {res.ok
+                  ? <span style={{ color: '#22c55e', fontWeight: 700 }}>Filled {res.summary?.total_contracts} @ avg {res.summary?.total_contracts ? (res.summary.total_cost_cents / res.summary.total_contracts).toFixed(1) : '—'}¢ · ${((res.summary?.total_cost_cents || 0) / 100).toFixed(2)}</span>
+                  : <span style={{ color: '#ef4444', wordBreak: 'break-word' }}>Not filled: {res.error || res.orders?.find(o => o.error)?.error || 'nothing at that price'}</span>}
+                <span onClick={() => setResult(r => ({ ...r, [t]: null }))} style={{ marginLeft: 6, color: '#475569', cursor: 'pointer' }}>dismiss</span>
+              </div>
+            )}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+function NHLTab() {
+  const [games, setGames] = useState([])
+  const [game, setGame] = useState(() => localStorage.getItem('nhl_board_game') || '')
+  const [snap, setSnap] = useState(null)
+  const [err, setErr] = useState('')
+  const [live, setLive] = useState({})
+  const [wsUp, setWsUp] = useState(false)
+  const [open, setOpen] = useState({})
+  const [sel, setSel] = useState(null)
+  const [ob, setOb] = useState(null)
+  const [take, setTake] = useState(50)
+  const [spend, setSpend] = useState(25)
+  const [token, setToken] = useState(() => localStorage.getItem('pitchpulse_token') || '')
+  const [showPin, setShowPin] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [result, setResult] = useState(null)
+  const [sweep, setSweep] = useState(null)
+  const [sweepMax, setSweepMax] = useState(97)
+  const [sweepBudget, setSweepBudget] = useState(50)
+  const [sweepPlan, setSweepPlan] = useState(null)
+  const [sweepResult, setSweepResult] = useState(null)
+
+  // Leafs schedule from Kalshi; default to today's game, else the next one
+  useEffect(() => {
+    fetch(`${API}/api/nhl/games`).then(r => r.json()).then(d => {
+      const list = d.games || []
+      setGames(list)
+      setGame(g => (g && list.some(x => x.code === g)) ? g : (list.find(x => x.date === d.today) || list[0])?.code || '')
+    }).catch(e => setErr(e.message))
+  }, [])
+  useEffect(() => { if (game) localStorage.setItem('nhl_board_game', game) }, [game])
+
+  const teams = useMemo(() => game ? [game.slice(7, 10), game.slice(10)] : [], [game])
+  const scoreKey = NHL_SCORE_PREFIX + game
+  const [sc, setSc] = useState(null)
+  useEffect(() => {
+    if (!game) return
+    try {
+      const saved = JSON.parse(localStorage.getItem(scoreKey))
+      if (saved?.lines && teams.every(t => saved.lines[t])) { setSc(saved); return }
+    } catch {}
+    setSc(nhlBlank(teams))
+  }, [game, scoreKey, teams])
+  useEffect(() => { if (sc && game) try { localStorage.setItem(scoreKey, JSON.stringify(sc)) } catch {} }, [sc, scoreKey, game])
+
+  useEffect(() => {
+    if (!game) return
+    let alive = true
+    setSnap(null); setSel(null); setSweep(null)
+    const load = () => fetch(`${API}/api/nhl/markets?game=${game}`).then(r => r.json()).then(d => {
+      if (!alive) return
+      if (d.groups?.length) { setSnap(d); setErr('') } else setErr(d.error || 'No open markets found')
+    }).catch(e => alive && setErr(e.message))
+    load()
+    const t = setInterval(load, 30000)
+    return () => { alive = false; clearInterval(t) }
+  }, [game])
+
+  useEffect(() => {
+    if (!game) return
+    let ws, timer, alive = true
+    setLive({})
+    const connect = () => {
+      ws = new WebSocket(getKalshiWsUrl({ nhlGame: game }))
+      ws.onmessage = (e) => {
+        const d = JSON.parse(e.data)
+        if (d.status === 'connected') setWsUp(true)
+        else if (d.type === 'price') setLive(prev => ({ ...prev, [d.ticker]: { yes_bid: d.yes_bid, yes_ask: d.yes_ask } }))
+      }
+      ws.onclose = () => { setWsUp(false); if (alive) timer = setTimeout(connect, 3000) }
+      ws.onerror = () => ws.close()
+    }
+    connect()
+    return () => { alive = false; clearTimeout(timer); ws?.close() }
+  }, [game])
+
+  const [pos, setPos] = useState({})
+  useEffect(() => {
+    if (!token || !game) { setPos({}); return }
+    let alive = true
+    const load = () => fetch(`${API}/api/nhl/positions`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ game, trade_token: token }),
+    }).then(r => r.json()).then(d => { if (alive && d.ok) setPos(Object.fromEntries(Object.entries(d.positions).map(([t, p]) => [t, p.position]))) }).catch(() => {})
+    load()
+    const t = setInterval(load, 5000)
+    return () => { alive = false; clearInterval(t) }
+  }, [token, game])
+
+  const withLive = (m) => {
+    const l = live[m.ticker]
+    const base = pos[m.ticker] ? { ...m, pos: pos[m.ticker] } : m
+    if (!l) return base
+    const yb = l.yes_bid > 0 ? Math.round(l.yes_bid * 100) : null
+    const ya = l.yes_ask > 0 && l.yes_ask < 1 ? Math.round(l.yes_ask * 100) : null
+    return { ...base, yes_bid: yb, yes_ask: ya, no_bid: ya != null ? 100 - ya : null, no_ask: yb != null ? 100 - yb : null }
+  }
+
+  const selTicker = sel?.ticker
+  const fetchOb = useCallback(async () => {
+    if (!selTicker) return
+    try { const r = await fetch(`${API}/api/kalshi/orderbook/${selTicker}`); const d = await r.json(); if (!d.error && d.ticker === selTicker) setOb(d) } catch {}
+  }, [selTicker])
+  useEffect(() => { setOb(null); if (!selTicker) return; fetchOb(); const t = setInterval(fetchOb, 2000); return () => clearInterval(t) }, [selTicker, fetchOb])
+
+  const groups = snap ? snap.groups.map(g => ({ ...g, markets: g.markets.map(withLive) })) : []
+  const gs = sc ? nhlGameState(sc, teams) : null
+  const locks = gs ? nhlLocks(groups, gs) : {}
+  const pregame = !gs || gs.state === 'pre'
+  const mlByTeam = useMemo(() => {
+    const out = {}
+    for (const m of groups.find(g => g.series === 'KXNHLGAME')?.markets || []) out[m.ticker.split('-').pop()] = m
+    return out
+  }, [groups])
+
+  const askFor = (m, side) => (side === 'yes' ? m.yes_ask : m.no_ask)
+  const lockLegs = (series) => groups.filter(g => !series || g.series === series)
+    .flatMap(g => g.markets.filter(m => locks[m.ticker] && askFor(m, locks[m.ticker]) != null)
+      .map(m => ({ ticker: m.ticker, side: locks[m.ticker], label: m.label, ask: askFor(m, locks[m.ticker]), kind: 'LOCK' })))
+  const allLockLegs = lockLegs(null)
+  const leader = gs ? [...teams].sort((a, b) => gs.scores[b] - gs.scores[a])[0] : teams[0]
+
+  let sweepLegs = [], combo = null
+  if (sweep?.kind === 'locks') sweepLegs = lockLegs(sweep.series).filter(l => l.ask <= sweepMax)
+  else if (sweep?.kind === 'combo' && gs) {
+    combo = nhlComboLegs(groups, gs, sweep)
+    sweepLegs = combo.legs.map(({ m, side, kind }) => ({ ticker: m.ticker, side, label: m.label, ask: askFor(m, side), kind }))
+      .filter(l => l.ask != null && l.ask <= sweepMax)
+  }
+  const legKey = sweepLegs.map(l => `${l.ticker}:${l.side}`).join(',')
+  useEffect(() => {
+    if (!legKey) { setSweepPlan(null); return }
+    let alive = true
+    const legs = legKey.split(',').map(k => { const [ticker, side] = k.split(':'); return { ticker, side } })
+    const load = () => fetch(`${API}/api/sweep/preview`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ legs, max_price_cents: sweepMax, budget_cents: Math.round(sweepBudget * 100) }),
+    }).then(r => r.json()).then(d => { if (alive) setSweepPlan(d) }).catch(() => {})
+    const first = setTimeout(load, 300)
+    const t = setInterval(load, 4000)
+    return () => { alive = false; clearTimeout(first); clearInterval(t) }
+  }, [legKey, sweepMax, sweepBudget])
+
+  const pick = (m, side, group) => {
+    if (sel?.ticker === m.ticker && sel?.side === side) { setSel(null); return }
+    setSweep(null); setSel({ ticker: m.ticker, side, label: m.label, group }); setTake(askFor(m, side) ?? 50); setResult(null)
+  }
+  const openSweep = (cfg) => { setSel(null); setSweepResult(null); setSweepPlan(null); setSweep(cfg) }
+  const lock = () => { localStorage.removeItem('pitchpulse_token'); setToken('') }
+  const liveSel = sel && groups.flatMap(g => g.markets).find(m => m.ticker === sel.ticker)
+  const liveAsk = liveSel ? askFor(liveSel, sel.side) : null
+
+  const execute = async () => {
+    if (!sel || !token) return
+    const { ticker, side, label } = sel
+    setBusy(true); setResult(null)
+    try {
+      const r = await fetch(`${API}/api/trade/execute`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ticker, side, max_price_cents: take, max_spend_cents: Math.round(spend * 100), trade_token: token }),
+      })
+      const d = await r.json()
+      setResult({ ...d, label, side, take })
+      if (d?.error === 'Unauthorized') { lock(); setShowPin(true) }
+    } catch (e) { setResult({ ok: false, error: e.message }) } finally { setBusy(false); fetchOb() }
+  }
+  const executeSweep = async () => {
+    if (!token || !sweepLegs.length) return
+    setBusy(true); setSweepResult(null)
+    try {
+      const r = await fetch(`${API}/api/sweep/execute`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ legs: sweepLegs.map(({ ticker, side }) => ({ ticker, side })), max_price_cents: sweepMax, budget_cents: Math.round(sweepBudget * 100), trade_token: token }),
+      })
+      const d = await r.json()
+      setSweepResult(d)
+      if (d?.error === 'Unauthorized') { lock(); setShowPin(true) }
+    } catch (e) { setSweepResult({ ok: false, error: e.message }) } finally { setBusy(false) }
+  }
+
+  const expanded = (s) => open[s] ?? NHL_DEFAULT_OPEN.has(s)
+  const setAll = (v) => setOpen(Object.fromEntries((snap?.groups || []).map(g => [g.series, v])))
+  const canLocks = !pregame && allLockLegs.length > 0
+  const nLocked = Object.keys(locks).length
+  const gameRow = games.find(g => g.code === game)
+
+  return (
+    <div style={{ animation: 'fadeIn 0.3s ease' }}>
+      {showPin && <TradeUnlockModal onClose={() => setShowPin(false)} onUnlocked={(t) => { setToken(t); setShowPin(false) }} />}
+
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+        <select value={game} onChange={e => setGame(e.target.value)} style={{
+          flex: 1, padding: '9px 10px', borderRadius: 8, background: '#0f172a', border: '1px solid #334155', color: '#f1f5f9', fontSize: 13, fontWeight: 700,
+        }}>
+          {!games.length && <option value="">Loading Leafs games...</option>}
+          {games.map(g => <option key={g.code} value={g.code}>{g.date} · {g.title}</option>)}
+        </select>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flex: 'none' }}>
+          {token
+            ? <span onClick={lock} style={{ fontSize: 10, color: '#f59e0b', fontWeight: 700, cursor: 'pointer' }}>TRADING ●</span>
+            : <span onClick={() => setShowPin(true)} style={{ fontSize: 10, color: '#475569', fontWeight: 600, cursor: 'pointer' }}>VIEW ONLY</span>}
+          {wsUp && <span style={{ fontSize: 10, color: '#22c55e', fontWeight: 700 }}>● LIVE</span>}
+        </div>
+      </div>
+      {snap && <div style={{ fontSize: 11, color: '#475569', marginBottom: 8 }}>{(snap.title || gameRow?.title || game).toUpperCase()} · {snap.market_count} markets · {snap.groups.length} types</div>}
+
+      {teams.length === 2 && <NHLGoalJump teams={teams} mlByTeam={mlByTeam} token={token} onUnlock={() => setShowPin(true)} onLock={lock} />}
+
+      {sc && teams.length === 2 && <NHLScoreKeeper sc={sc} setSc={setSc} teams={teams} />}
+
+      {snap && gs && (
+        <>
+          <div style={{ display: 'flex', gap: 8, marginBottom: 4 }}>
+            <button disabled={!canLocks} onClick={() => openSweep({ kind: 'locks', series: null, title: 'Every locked market' })} style={{
+              ...cfbChip(canLocks), flex: 1, padding: '9px 0', opacity: canLocks ? 1 : 0.5, cursor: canLocks ? 'pointer' : 'default',
+            }}>🔒 Sweep locks ({pregame ? 0 : allLockLegs.length})</button>
+            <button disabled={pregame} onClick={() => openSweep({
+              kind: 'combo', title: 'Sweeper', period: 'GAME', team: leader,
+              mlCushion: 2, spreadCushion: 1, totalCushion: 2, mlYes: true, spreadYes: true, spreadNo: true, totalYes: true, totalNo: true,
+            })} style={{ ...cfbChip(false), flex: 1, padding: '9px 0', opacity: pregame ? 0.5 : 1, cursor: pregame ? 'default' : 'pointer' }}>⚡ Sweeper</button>
+          </div>
+          <div style={{ fontSize: 10, color: '#475569', marginBottom: 10 }}>
+            {pregame ? 'Sweeps unlock once you move the game state past Pregame.' : `${nLocked} markets decided by your score.`}
+          </div>
+        </>
+      )}
+
+      {err && !snap && <div style={{ fontSize: 13, color: '#ef4444', textAlign: 'center', padding: 20 }}>{err}</div>}
+      {!snap && !err && game && <div style={{ fontSize: 13, color: '#475569', textAlign: 'center', padding: 40 }}>Loading Kalshi markets...</div>}
+
+      {snap && (
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 12, marginBottom: 8, fontSize: 11 }}>
+          <span onClick={() => setAll(true)} style={{ color: '#3b82f6', cursor: 'pointer' }}>expand all</span>
+          <span onClick={() => setAll(false)} style={{ color: '#3b82f6', cursor: 'pointer' }}>collapse all</span>
+        </div>
+      )}
+
+      {groups.map(g => {
+        const isOpen = expanded(g.series)
+        const markets = g.markets
+        const groupLocks = lockLegs(g.series).length
+        let lineIdx = -1
+        if (markets.length > 3) {
+          let best = Infinity
+          markets.forEach((m, i) => {
+            if (m.yes_bid == null || m.yes_ask == null) return
+            const d = Math.abs((m.yes_bid + m.yes_ask) / 2 - 50)
+            if (d < best) { best = d; lineIdx = i }
+          })
+        }
+        return (
+          <div key={g.series} style={{ background: '#1e293b', borderRadius: 12, marginBottom: 8, border: '1px solid #334155', overflow: 'hidden' }}>
+            <div onClick={() => setOpen(o => ({ ...o, [g.series]: !isOpen }))} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 12px', cursor: 'pointer', gap: 8 }}>
+              <span style={{ flex: 1, fontSize: 13, fontWeight: 700, color: '#e2e8f0' }}>{g.title}</span>
+              {groupLocks > 0 && (
+                <span onClick={(e) => { e.stopPropagation(); openSweep({ kind: 'locks', series: g.series, title: `Locked · ${g.title}` }) }}
+                  style={{ fontSize: 11, fontWeight: 700, color: '#f59e0b', cursor: 'pointer' }}>🔒 sweep {groupLocks}</span>
+              )}
+              <span style={{ fontSize: 11, color: '#475569' }}>{markets.length} {isOpen ? '▼' : '▶'}</span>
+            </div>
+            {isOpen && (
+              <div style={{ padding: '0 10px 6px 4px' }}>
+                {markets.map((m, i) => (
+                  <CFBMarketRow key={m.ticker} m={m} sel={sel} isLine={i === lineIdx} lock={locks[m.ticker]} onPick={(mk, side) => pick(mk, side, g.title)} />
+                ))}
+              </div>
+            )}
+          </div>
+        )
+      })}
+
+      {(sel || sweep) && <div style={{ height: sweep ? 560 : 340 }} />}
+
+      {sweep && (
+        <SweepPanel title={sweep.title} legs={sweepLegs} plan={sweepPlan}
+          controls={sweep.kind === 'combo' && combo ? <NHLComboControls sweep={sweep} setSweep={setSweep} combo={combo} teams={teams} /> : null}
+          max={sweepMax} setMax={setSweepMax} budget={sweepBudget} setBudget={setSweepBudget}
+          token={token} busy={busy} result={sweepResult} onUnlock={() => setShowPin(true)}
+          onExecute={executeSweep} onClose={() => setSweep(null)} onDismiss={() => setSweepResult(null)} />
+      )}
+      {sel && (
+        <KalshiOrderTicket sel={sel} ob={ob} liveAsk={liveAsk} take={take} setTake={setTake} spend={spend} setSpend={setSpend}
+          token={token} busy={busy} result={result} onClose={() => setSel(null)} onUnlock={() => setShowPin(true)}
+          onExecute={execute} onDismiss={() => setResult(null)} />
+      )}
+    </div>
+  )
+}
+
 // ── MLB game board: every Kalshi market for one game, hand-scored ───────────
 // Markets: /api/mlb/board/markets (game / segment / inning types, no player
 // props). Score: MLBScoreKeeper, kept by hand so a sweep can be staged on the
@@ -4715,6 +5366,7 @@ export default function App() {
           { id: 'plakata',  label: '💥 PitchPulse' },
           { id: 'cfb',      label: '🏟️ CFB' },
           { id: 'mlb',      label: '⚾ Board' },
+          { id: 'nhl',      label: '🏒 Leafs' },
           { id: 'spring',   label: '🌸 Odds' },
           { id: 'hr',       label: '💣 HR' },
           { id: 'ff',       label: '🏈 FF' },
@@ -4728,7 +5380,7 @@ export default function App() {
         ))}
       </div>
 
-      {tab === 'research' ? <ResearchTab /> : tab === 'sim' ? <AtBatTab /> : tab === 'batch' ? <BatchSimTab /> : tab === 'plakata' ? <PlakataTab /> : tab === 'cfb' ? <CFBTab /> : tab === 'mlb' ? <MLBBoardTab /> : tab === 'hr' ? <HRScannerTab /> : tab === 'ff' ? <FantasyTab /> : <SpringOddsTab />}
+      {tab === 'research' ? <ResearchTab /> : tab === 'sim' ? <AtBatTab /> : tab === 'batch' ? <BatchSimTab /> : tab === 'plakata' ? <PlakataTab /> : tab === 'cfb' ? <CFBTab /> : tab === 'mlb' ? <MLBBoardTab /> : tab === 'nhl' ? <NHLTab /> : tab === 'hr' ? <HRScannerTab /> : tab === 'ff' ? <FantasyTab /> : <SpringOddsTab />}
 
       <style>{`
         * { box-sizing: border-box; }
