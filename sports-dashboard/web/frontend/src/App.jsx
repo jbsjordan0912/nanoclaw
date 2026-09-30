@@ -2862,7 +2862,7 @@ function cfbComboLegs(groups, gs, cfg) {
   return { legs, margin, total, other, started }
 }
 
-function SlideToConfirm({ label, busy, disabled, onConfirm, color }) {
+function SlideToConfirm({ label, busy, disabled, onConfirm, color, height = 48 }) {
   const trackRef = useRef(null)
   const xRef = useRef(0)
   const cbRef = useRef(onConfirm)
@@ -2878,7 +2878,7 @@ function SlideToConfirm({ label, busy, disabled, onConfirm, color }) {
     setDragging(true)
     const move = (ev) => {
       const cx = (ev.touches?.[0] || ev).clientX
-      xRef.current = Math.max(0, Math.min(cx - startX, rect.width - 48))
+      xRef.current = Math.max(0, Math.min(cx - startX, rect.width - height))
       setX(xRef.current)
     }
     const end = () => {
@@ -2886,7 +2886,7 @@ function SlideToConfirm({ label, busy, disabled, onConfirm, color }) {
       document.removeEventListener('mouseup', end)
       document.removeEventListener('touchmove', move)
       document.removeEventListener('touchend', end)
-      if (xRef.current >= rect.width - 80) cbRef.current()
+      if (xRef.current >= rect.width - height - 32) cbRef.current()
       xRef.current = 0
       setX(0)
       setDragging(false)
@@ -2900,25 +2900,25 @@ function SlideToConfirm({ label, busy, disabled, onConfirm, color }) {
   const off = disabled && !busy
   return (
     <div ref={trackRef} style={{
-      position: 'relative', height: 48, borderRadius: 24, background: '#0f172a',
+      position: 'relative', height, borderRadius: height / 2, background: '#0f172a',
       border: `1px solid ${off ? '#334155' : color + '55'}`, overflow: 'hidden',
       userSelect: 'none', WebkitUserSelect: 'none', touchAction: 'none',
     }}>
       <div style={{
-        position: 'absolute', left: 0, top: 0, bottom: 0, width: x + 48, borderRadius: 24,
+        position: 'absolute', left: 0, top: 0, bottom: 0, width: x + height, borderRadius: height / 2,
         background: dragging ? `linear-gradient(90deg, ${color}44, ${color}22)` : 'transparent',
         transition: dragging ? 'none' : 'width 0.3s',
       }} />
       <div style={{
         position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
-        fontSize: 12, fontWeight: 700, letterSpacing: '0.08em', pointerEvents: 'none',
+        fontSize: height > 56 ? 15 : 12, fontWeight: 700, letterSpacing: '0.08em', pointerEvents: 'none',
         color: off ? '#475569' : color,
       }}>{busy ? 'EXECUTING...' : label}</div>
       {!off && !busy && (
         <div onMouseDown={start} onTouchStart={start} style={{
-          position: 'absolute', top: 2, left: 2 + x, width: 44, height: 44, borderRadius: 22,
+          position: 'absolute', top: 2, left: 2 + x, width: height - 4, height: height - 4, borderRadius: (height - 4) / 2,
           background: color, cursor: 'grab', display: 'flex', alignItems: 'center', justifyContent: 'center',
-          fontSize: 18, color: '#000', fontWeight: 900, transition: dragging ? 'none' : 'left 0.3s',
+          fontSize: height > 56 ? 26 : 18, color: '#000', fontWeight: 900, transition: dragging ? 'none' : 'left 0.3s',
         }}>⟩</div>
       )}
     </div>
@@ -3989,6 +3989,7 @@ function NHLGoalJump({ teams, mlByTeam, token, onUnlock, onLock }) {
   const [books, setBooks] = useState({})
   const [busy, setBusy] = useState(null)
   const [result, setResult] = useState({})
+  const [armed, setArmed] = useState(null)   // team whose "scored" sheet is open
   const tickers = teams.map(t => mlByTeam[t]?.ticker).filter(Boolean).join(',')
 
   useEffect(() => {
@@ -4035,8 +4036,54 @@ function NHLGoalJump({ teams, mlByTeam, token, onUnlock, onLock }) {
     } catch (e) { setResult(res => ({ ...res, [t]: { ok: false, error: e.message } })) }
     finally { setBusy(null) }
   }
+  const info = (t) => {
+    const m = mlByTeam[t]; const c = cfg[t]; const ob = m && books[m.ticker]
+    const ceiling = c.target == null ? null : Math.max(1, Math.min(99, c.target - c.buffer))
+    const plan = ob && ceiling != null ? cfbSweep(sideLadder(ob, 'yes').asks, ceiling, Math.round(c.budget * 100)) : null
+    return { m, c, ob, ceiling, plan, color: t === NHL_TEAM ? '#3b82f6' : '#22c55e' }
+  }
+  const sheet = armed && info(armed)
 
   return (
+    <>
+    {sheet && (
+      <div style={{ position: 'fixed', left: 0, right: 0, bottom: 0, zIndex: 60, display: 'flex', justifyContent: 'center', pointerEvents: 'none' }}>
+        <div style={{
+          width: '100%', maxWidth: 480, pointerEvents: 'auto', background: '#1e293b', borderTop: `3px solid ${sheet.color}`,
+          borderRadius: '16px 16px 0 0', padding: '14px 16px calc(16px + env(safe-area-inset-bottom))', boxShadow: '0 -8px 24px rgba(0,0,0,0.6)',
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+            <span style={{ fontSize: 12, fontWeight: 900, color: '#000', background: sheet.color, borderRadius: 4, padding: '3px 8px' }}>🚨 {armed} SCORED</span>
+            <div style={{ flex: 1, fontSize: 13, color: '#e2e8f0', fontWeight: 700 }}>Buy {armed} moneyline</div>
+            <span onClick={() => setArmed(null)} style={{ fontSize: 22, color: '#475569', cursor: 'pointer', lineHeight: 1 }}>×</span>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, color: '#94a3b8', marginBottom: 4 }}>
+            <span>live ask <b style={{ color: '#e2e8f0' }}>{sheet.m?.yes_ask ?? '—'}¢</b></span>
+            <span>target <b style={{ color: '#e2e8f0' }}>{sheet.c.target ?? '—'}</b> − buffer <b style={{ color: '#e2e8f0' }}>{sheet.c.buffer}</b></span>
+          </div>
+          <div style={{ textAlign: 'center', margin: '6px 0 10px' }}>
+            <div style={{ fontSize: 10, color: '#475569' }}>BUYS UP TO</div>
+            <div style={{ fontSize: 40, fontWeight: 900, color: sheet.color, lineHeight: 1 }}>{sheet.ceiling ?? '—'}¢</div>
+            <div style={{ fontSize: 13, color: '#94a3b8', marginTop: 6 }}>
+              {sheet.plan ? (sheet.plan.contracts
+                ? <>≈ <b style={{ color: '#e2e8f0' }}>{sheet.plan.contracts}</b> contracts @ avg {(sheet.plan.cost / sheet.plan.contracts).toFixed(1)}¢ · <b style={{ color: '#e2e8f0' }}>${(sheet.plan.cost / 100).toFixed(2)}</b> of ${sheet.c.budget} · pays ${sheet.plan.contracts.toFixed(0)}</>
+                : <span style={{ color: '#f59e0b' }}>nothing on the book ≤{sheet.ceiling}¢ right now</span>) : 'loading book...'}
+            </div>
+          </div>
+          {token
+            ? <SlideToConfirm color={sheet.color} height={72} busy={busy === armed} disabled={!sheet.m || sheet.ceiling == null || busy != null}
+                label={`SLIDE TO BUY ${armed} ML ≤${sheet.ceiling}¢ →`} onConfirm={() => fire(armed)} />
+            : <button onClick={onUnlock} style={{ width: '100%', height: 56, borderRadius: 28, border: '1px solid #f59e0b55', background: '#0f172a', color: '#f59e0b', fontSize: 14, fontWeight: 700, cursor: 'pointer' }}>Unlock trading</button>}
+          {result[armed] && (
+            <div style={{ marginTop: 10, fontSize: 13, textAlign: 'center' }}>
+              {result[armed].ok
+                ? <span style={{ color: '#22c55e', fontWeight: 700 }}>Filled {result[armed].summary?.total_contracts} @ avg {result[armed].summary?.total_contracts ? (result[armed].summary.total_cost_cents / result[armed].summary.total_contracts).toFixed(1) : '—'}¢ · ${((result[armed].summary?.total_cost_cents || 0) / 100).toFixed(2)}</span>
+                : <span style={{ color: '#ef4444', wordBreak: 'break-word' }}>Not filled: {result[armed].error || result[armed].orders?.find(o => o.error)?.error || 'nothing at that price'}</span>}
+            </div>
+          )}
+        </div>
+      </div>
+    )}
     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 10 }}>
       {teams.map(t => {
         const m = mlByTeam[t]; const c = cfg[t]; const ob = m && books[m.ticker]
@@ -4069,15 +4116,15 @@ function NHLGoalJump({ teams, mlByTeam, token, onUnlock, onLock }) {
               buys ≤ <b style={{ color: '#e2e8f0' }}>{ceiling ?? '—'}¢</b>
               {plan ? (plan.contracts ? <> · ≈ <b style={{ color: '#e2e8f0' }}>{plan.contracts}</b> @ {(plan.cost / plan.contracts).toFixed(1)}¢ · ${(plan.cost / 100).toFixed(0)} now</> : <> · nothing on the book ≤{ceiling}¢ right now</>) : ''}
             </div>
-            {token
-              ? <SlideToConfirm color={color} busy={busy === t} disabled={!m || ceiling == null || busy != null}
-                  label={`${t} SCORED →`} onConfirm={() => fire(t)} />
-              : <button onClick={onUnlock} style={{ width: '100%', height: 40, borderRadius: 20, border: '1px solid #f59e0b55', background: '#0f172a', color: '#f59e0b', fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>Unlock trading</button>}
+            <button disabled={!m || ceiling == null} onClick={() => { setResult(r => ({ ...r, [t]: null })); setArmed(t) }} style={{
+              width: '100%', height: 52, borderRadius: 12, border: `2px solid ${color}`, background: `${color}22`,
+              color, fontSize: 16, fontWeight: 900, letterSpacing: '0.04em', cursor: m ? 'pointer' : 'default', opacity: m && ceiling != null ? 1 : 0.4,
+            }}>🚨 {t} SCORED</button>
             {res && (
               <div style={{ marginTop: 6, fontSize: 11 }}>
                 {res.ok
-                  ? <span style={{ color: '#22c55e', fontWeight: 700 }}>Filled {res.summary?.total_contracts} @ avg {res.summary?.total_contracts ? (res.summary.total_cost_cents / res.summary.total_contracts).toFixed(1) : '—'}¢ · ${((res.summary?.total_cost_cents || 0) / 100).toFixed(2)}</span>
-                  : <span style={{ color: '#ef4444', wordBreak: 'break-word' }}>Not filled: {res.error || res.orders?.find(o => o.error)?.error || 'nothing at that price'}</span>}
+                  ? <span style={{ color: '#22c55e', fontWeight: 700 }}>Filled {res.summary?.total_contracts} @ ${((res.summary?.total_cost_cents || 0) / 100).toFixed(2)}</span>
+                  : <span style={{ color: '#ef4444', wordBreak: 'break-word' }}>Not filled</span>}
                 <span onClick={() => setResult(r => ({ ...r, [t]: null }))} style={{ marginLeft: 6, color: '#475569', cursor: 'pointer' }}>dismiss</span>
               </div>
             )}
@@ -4085,6 +4132,7 @@ function NHLGoalJump({ teams, mlByTeam, token, onUnlock, onLock }) {
         )
       })}
     </div>
+    </>
   )
 }
 
