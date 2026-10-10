@@ -1,7 +1,8 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react'
 import { mlbLocks, mlbInningLegs, mlbGameLegs } from './mlbRules.js'
+import UpsetsTab from './UpsetsTab.jsx'
 
-const API = window.location.hostname === 'localhost'
+export const API = window.location.hostname === 'localhost'
   ? ''  // proxied via vite dev server
   : 'https://mlb-simulator-api.onrender.com'
 
@@ -2925,7 +2926,7 @@ function SlideToConfirm({ label, busy, disabled, onConfirm, color, height = 48 }
   )
 }
 
-function TradeUnlockModal({ onUnlocked, onClose }) {
+export function TradeUnlockModal({ onUnlocked, onClose }) {
   const [pw, setPw] = useState('')
   const [err, setErr] = useState('')
   const submit = async () => {
@@ -5392,8 +5393,32 @@ function FantasyTab() {
 }
 
 // ── Root App ──────────────────────────────────────────────────────────────────
+// Every tab stays in the codebase; ENABLED_TABS decides what the strip shows.
+// To bring a page back, add its id here and (if it has backend startup work:
+// sim, batch, board) to DASH_FEATURES on the Render service.
+const ALL_TABS = [
+  { id: 'research', label: '🔍 Research', el: () => <ResearchTab /> },
+  { id: 'sim',      label: '⚾ Sim',       el: () => <AtBatTab /> },
+  { id: 'batch',    label: '📊 1K',        el: () => <BatchSimTab /> },
+  { id: 'plakata',  label: '💥 PitchPulse', el: () => <PlakataTab /> },
+  { id: 'cfb',      label: '🏟️ CFB',       el: () => <CFBTab /> },
+  { id: 'mlb',      label: '⚾ Board',     el: () => <MLBBoardTab /> },
+  { id: 'nhl',      label: '🏒 Leafs',     el: () => <NHLTab /> },
+  { id: 'upsets',   label: '🎓 Upsets',    el: () => <UpsetsTab /> },
+  { id: 'spring',   label: '🌸 Odds',      el: () => <SpringOddsTab /> },
+  { id: 'hr',       label: '💣 HR',        el: () => <HRScannerTab /> },
+  { id: 'ff',       label: '🏈 FF',        el: () => <FantasyTab /> },
+]
+const ENABLED_TABS = ['research', 'cfb', 'nhl', 'upsets']
+const TABS = ALL_TABS.filter(t => ENABLED_TABS.includes(t.id))
+
 export default function App() {
-  const [tab, setTab] = useState('research')
+  const [tab, setTab] = useState(() => {
+    const saved = localStorage.getItem('dash_tab')
+    return ENABLED_TABS.includes(saved) ? saved : ENABLED_TABS[0]
+  })
+  useEffect(() => { localStorage.setItem('dash_tab', tab) }, [tab])
+  const active = TABS.find(t => t.id === tab) || TABS[0]
 
   return (
     <div style={{ maxWidth: 480, margin: '0 auto', padding: '16px 16px 60px', fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif', color: '#f1f5f9', background: '#0f172a', minHeight: '100vh' }}>
@@ -5407,20 +5432,9 @@ export default function App() {
 
       {/* Tab switcher */}
       <div style={{ display: 'flex', flexWrap: 'wrap', borderRadius: 10, overflow: 'hidden', border: '1px solid #1e293b', marginBottom: 20, background: '#1e293b', gap: 1 }}>
-        {[
-          { id: 'research', label: '🔍 Research' },
-          { id: 'sim',      label: '⚾ Sim' },
-          { id: 'batch',    label: '📊 1K' },
-          { id: 'plakata',  label: '💥 PitchPulse' },
-          { id: 'cfb',      label: '🏟️ CFB' },
-          { id: 'mlb',      label: '⚾ Board' },
-          { id: 'nhl',      label: '🏒 Leafs' },
-          { id: 'spring',   label: '🌸 Odds' },
-          { id: 'hr',       label: '💣 HR' },
-          { id: 'ff',       label: '🏈 FF' },
-        ].map(t => (
+        {TABS.map(t => (
           <button key={t.id} onClick={() => setTab(t.id)} style={{
-            flex: '1 0 32%', padding: '10px 4px', border: 'none', fontSize: 12, fontWeight: 600, whiteSpace: 'nowrap',
+            flex: `1 0 ${TABS.length <= 4 ? 24 : 32}%`, padding: '10px 4px', border: 'none', fontSize: 12, fontWeight: 600, whiteSpace: 'nowrap',
             background: tab === t.id ? '#2563eb' : 'transparent',
             color: tab === t.id ? '#fff' : '#64748b',
             cursor: 'pointer', transition: 'background 0.15s',
@@ -5428,7 +5442,7 @@ export default function App() {
         ))}
       </div>
 
-      {tab === 'research' ? <ResearchTab /> : tab === 'sim' ? <AtBatTab /> : tab === 'batch' ? <BatchSimTab /> : tab === 'plakata' ? <PlakataTab /> : tab === 'cfb' ? <CFBTab /> : tab === 'mlb' ? <MLBBoardTab /> : tab === 'nhl' ? <NHLTab /> : tab === 'hr' ? <HRScannerTab /> : tab === 'ff' ? <FantasyTab /> : <SpringOddsTab />}
+      {active.el()}
 
       <style>{`
         * { box-sizing: border-box; }

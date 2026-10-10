@@ -17,8 +17,41 @@ from datetime import datetime, timezone, timedelta
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 load_dotenv(os.path.join(os.path.dirname(__file__), "../../data-pipeline/.env"))
 
-import simulator as sim
 from supabase import create_client
+
+# ---------------------------------------------------------------------------
+# Feature switch. Every tab's code stays in the repo; this only decides what
+# gets imported, warmed, or polled at startup so the box is not paying memory
+# and CPU for pages nobody has open. Flip a feature back on by adding it to
+# DASH_FEATURES (comma-separated) in the Render environment, no code change.
+#   sim        ⚾ Sim        - simulator.py (Supabase pitch pulls, WP lookup)
+#   batch      📊 1K         - sim_te + lightgbm models_te (~360 MB RSS when warm)
+#   board      ⚾ Board      - MLB board startup warm (13-series Kalshi sweep)
+#   plakata / hr / ff / spring - no startup work; listed so they can be gated later
+#   cfb / nhl / research / upsets - on
+# ---------------------------------------------------------------------------
+FEATURES = {f.strip() for f in os.environ.get("DASH_FEATURES", "research,cfb,nhl,upsets").split(",") if f.strip()}
+
+
+def feature_on(name: str) -> bool:
+    return name in FEATURES
+
+
+class _FeatureOff:
+    """Stand-in for a module whose feature is switched off: any attribute
+    access answers 503 instead of importing the heavy dependency."""
+    def __init__(self, name: str):
+        self._name = name
+
+    def __getattr__(self, item):
+        raise HTTPException(503, f"The {self._name} feature is switched off on this server (DASH_FEATURES).")
+
+
+if feature_on("sim"):
+    import simulator as sim
+else:
+    sim = _FeatureOff("sim")
+print(f"[features] on: {sorted(FEATURES)}")
 
 app = FastAPI(title="MLB At-Bat Simulator API")
 
@@ -163,14 +196,17 @@ def simulate(req: SimRequest):
 # TE engine — 1,000-AB batch simulation (vendored: atbat_engine + models_te)
 # ---------------------------------------------------------------------------
 
-import sim_te
+if feature_on("batch"):
+    import sim_te
 
-@app.on_event("startup")
-def _warm_te():
-    try:
-        sim_te.warm()
-    except Exception as e:
-        print(f"[sim_te] warm failed (lazy-load on first request): {e}")
+    @app.on_event("startup")
+    def _warm_te():
+        try:
+            sim_te.warm()
+        except Exception as e:
+            print(f"[sim_te] warm failed (lazy-load on first request): {e}")
+else:
+    sim_te = _FeatureOff("1K batch sim")
 
 class BatchSimRequest(BaseModel):
     batter_id: int
@@ -2045,6 +2081,8 @@ async def _cfb_snapshot(game: str) -> dict:
 @app.on_event("startup")
 async def _cfb_warm():
     """Series discovery takes a few seconds; do it before the first page load."""
+    if not feature_on("cfb"):
+        return
     async def go():
         try:
             await _cfb_snapshot(CFB_DEFAULT_GAME)
@@ -2904,6 +2942,8 @@ async def _mlb_state(game_pk: int) -> dict:
 
 @app.on_event("startup")
 async def _mlb_board_warm():
+    if not feature_on("board"):
+        return
     async def go():
         try:
             await _mlb_markets()
@@ -3982,3 +4022,16 @@ async def nfl_fantasy_draftboard(
         "total": len(rows),
         "players": rows[:max(1, min(limit, 400))],
     }
+
+
+# ---------------------------------------------------------------------------
+# Unranked Upsets (Kalshi KXCFBUNRANKEDUPSET) — see upsets.py
+# ---------------------------------------------------------------------------
+if feature_on("upsets"):
+    import upsets as _upsets
+    _upsets.configure(_verify_trade_token)
+    app.include_router(_upsets.router)
+
+    @app.on_event("startup")
+    def _upsets_start():
+        _upsets.start()
