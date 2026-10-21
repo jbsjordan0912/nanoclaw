@@ -2706,8 +2706,8 @@ function HRScannerTab() {
 }
 
 // ── College football game board (every Kalshi market for one game) ───────────
-const CFB_GAME = '26SEP12RICEND'   // Rice @ Notre Dame, Sat 9/12
-const CFB_TEAMS = ['RICE', 'ND']    // away, home: Kalshi's ticker codes
+const CFB_GAME = '26OCT24TXAMALA'  // Texas A&M @ Alabama, Sat 10/24
+const CFB_TEAMS = ['TXAM', 'ALA']   // away, home: Kalshi's ticker codes
 const CFB_SCORE_KEY = `cfb_score_${CFB_GAME}`
 const CFB_SPEND_CHIPS = [10, 25, 50, 100]
 const CFB_SWEEP_BUDGETS = [25, 50, 100, 250]
@@ -2730,7 +2730,7 @@ const CFB_PHASES = [
   { key: 'final', label: 'Final', period: 5, final: true, scoreIn: null },
 ]
 const CFB_SCORES = [['TD+1', 7, true], ['TD', 6, true], ['FG', 3, false], ['+2', 2, false], ['+1', 1, false]]
-const CFB_BLANK_SCORE = { phase: 'pre', ot: false, lines: { RICE: [0, 0, 0, 0, 0], ND: [0, 0, 0, 0, 0] }, tds: { RICE: 0, ND: 0 }, firstTd: null }
+const CFB_BLANK_SCORE = { phase: 'pre', ot: false, lines: { TXAM: [0, 0, 0, 0, 0], ALA: [0, 0, 0, 0, 0] }, tds: { TXAM: 0, ALA: 0 }, firstTd: null }
 // Sweeper periods: [series infix, label, periods counted (null = whole game incl. OT)]
 const CFB_PERIODS = [['GAME', 'Game', null], ['1H', '1H', [1, 2]], ['1Q', 'Q1', [1]], ['2Q', 'Q2', [2]], ['3Q', 'Q3', [3]], ['4Q', 'Q4', [4]]]
 
@@ -3623,9 +3623,9 @@ function CFBTab() {
 
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12 }}>
         <div>
-          <div style={{ fontSize: 13, fontWeight: 800, color: '#e2e8f0' }}>{(snap?.title || 'Rice vs Notre Dame').toUpperCase()}</div>
+          <div style={{ fontSize: 13, fontWeight: 800, color: '#e2e8f0' }}>{(snap?.title || 'Texas A&M vs Alabama').toUpperCase()}</div>
           <div style={{ fontSize: 11, color: '#475569' }}>
-            Sat 9/12 · 3:30 PM ET{snap ? ` · ${snap.market_count} markets · ${snap.groups.length} types` : ''}
+            Sat 10/24 · 3:30 PM ET{snap ? ` · ${snap.market_count} markets · ${snap.groups.length} types` : ''}
           </div>
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>

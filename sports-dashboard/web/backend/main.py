@@ -1921,7 +1921,7 @@ async def hr_cancel_game(game_key: str):
 # event_tickers, so we probe each NCAAF series once (cached) to learn which
 # carry the game, then re-read only those events for each snapshot. Prices
 # between snapshots stream over /api/ws/kalshi?cfb_game=...
-CFB_DEFAULT_GAME = "26SEP12RICEND"   # Rice @ Notre Dame, 2026-09-12
+CFB_DEFAULT_GAME = "26OCT24TXAMALA"  # Texas A&M @ Alabama, 2026-10-24
 _CFB_GAME_RE = re.compile(r"^[0-9A-Z]{6,30}$")
 _CFB_SERIES_TTL = 900.0
 _CFB_SNAPSHOT_TTL = 10.0
@@ -2168,7 +2168,7 @@ async def _kalshi_positions_for_game(game: str) -> dict:
 # ---------------------------------------------------------------------------
 
 ESPN_CFB_API = "https://site.api.espn.com/apis/site/v2/sports/football/college-football"
-CFB_DEFAULT_ESPN_EVENT = "401859184"   # Rice @ Notre Dame, 2026-09-12
+CFB_DEFAULT_ESPN_EVENT = "401856727"   # Texas A&M @ Alabama, 2026-10-24
 _CFB_STATE_TTL = 4.0
 _cfb_state_cache = {}      # espn event id -> {"at": float, "data": dict}
 
