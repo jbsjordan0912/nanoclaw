@@ -3986,8 +3986,11 @@ function NHLScoreKeeper({ sc, setSc, teams }) {
 // up to (target win% − buffer), cheapest asks first, within the budget. Both
 // stay armed all game. Target defaults to the live price + 10 the first time a
 // price is seen; everything is adjustable.
+const NHL_JUMP_DEFAULT = { target: null, buffer: 3, budget: 100 }
 function NHLGoalJump({ teams, mlByTeam, token, onUnlock, onLock }) {
-  const [cfg, setCfg] = useState(() => Object.fromEntries(teams.map(t => [t, { target: null, buffer: 3, budget: 100 }])))
+  // cfg is keyed by team; teams can change under us (the saved game was stale,
+  // or the user picked another game), so never assume cfg[t] exists.
+  const [cfg, setCfg] = useState(() => Object.fromEntries(teams.map(t => [t, { ...NHL_JUMP_DEFAULT }])))
   const [books, setBooks] = useState({})
   const [busy, setBusy] = useState(null)
   const [result, setResult] = useState({})
@@ -4011,6 +4014,7 @@ function NHLGoalJump({ teams, mlByTeam, token, onUnlock, onLock }) {
       const next = { ...c }
       for (const t of teams) {
         const m = mlByTeam[t]
+        if (!next[t]) { next[t] = { ...NHL_JUMP_DEFAULT }; changed = true }
         if (next[t].target == null && m && m.yes_ask != null) {
           const mid = m.yes_bid != null ? Math.round((m.yes_bid + m.yes_ask) / 2) : m.yes_ask
           next[t] = { ...next[t], target: Math.min(99, mid + 10) }
@@ -4021,9 +4025,9 @@ function NHLGoalJump({ teams, mlByTeam, token, onUnlock, onLock }) {
     })
   }, [mlByTeam, teams])
 
-  const set = (t, patch) => setCfg(c => ({ ...c, [t]: { ...c[t], ...patch } }))
+  const set = (t, patch) => setCfg(c => ({ ...c, [t]: { ...NHL_JUMP_DEFAULT, ...c[t], ...patch } }))
   const fire = async (t) => {
-    const m = mlByTeam[t]; const c = cfg[t]
+    const m = mlByTeam[t]; const c = cfg[t] || NHL_JUMP_DEFAULT
     if (!m || !token || c.target == null) return
     const ceiling = Math.max(1, Math.min(99, c.target - c.buffer))
     setBusy(t); setResult(r => ({ ...r, [t]: null }))
@@ -4088,7 +4092,7 @@ function NHLGoalJump({ teams, mlByTeam, token, onUnlock, onLock }) {
     )}
     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 10 }}>
       {teams.map(t => {
-        const m = mlByTeam[t]; const c = cfg[t]; const ob = m && books[m.ticker]
+        const m = mlByTeam[t]; const c = cfg[t] || NHL_JUMP_DEFAULT; const ob = m && books[m.ticker]
         const ceiling = c.target == null ? null : Math.max(1, Math.min(99, c.target - c.buffer))
         const plan = ob && ceiling != null ? cfbSweep(sideLadder(ob, 'yes').asks, ceiling, Math.round(c.budget * 100)) : null
         const color = t === NHL_TEAM ? '#3b82f6' : '#22c55e'
@@ -4343,7 +4347,7 @@ function NHLTab() {
       </div>
       {snap && <div style={{ fontSize: 11, color: '#475569', marginBottom: 8 }}>{(snap.title || gameRow?.title || game).toUpperCase()} · {snap.market_count} markets · {snap.groups.length} types</div>}
 
-      {teams.length === 2 && <NHLGoalJump teams={teams} mlByTeam={mlByTeam} token={token} onUnlock={() => setShowPin(true)} onLock={lock} />}
+      {teams.length === 2 && <NHLGoalJump key={teams.join('-')} teams={teams} mlByTeam={mlByTeam} token={token} onUnlock={() => setShowPin(true)} onLock={lock} />}
 
       {sc && teams.length === 2 && <NHLScoreKeeper sc={sc} setSc={setSc} teams={teams} />}
 
