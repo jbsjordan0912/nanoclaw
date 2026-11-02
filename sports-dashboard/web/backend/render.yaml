@@ -18,6 +18,6 @@ services:
       - key: ODDSBLAZE_API_KEY
         sync: false
       # Which tabs get backend startup work (models, warmers, pollers). Default in
-      # main.py is research,cfb,nhl,upsets; add sim,batch,board,... to turn pages back on.
+      # main.py is research,cfb,nhl,upsets,trades; add sim,batch,board,... to turn pages back on.
       # - key: DASH_FEATURES
-      #   value: research,cfb,nhl,upsets
+      #   value: research,cfb,nhl,upsets,trades

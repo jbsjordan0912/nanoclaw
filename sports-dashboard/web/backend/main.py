@@ -30,7 +30,7 @@ from supabase import create_client
 #   plakata / hr / ff / spring - no startup work; listed so they can be gated later
 #   cfb / nhl / research / upsets - on
 # ---------------------------------------------------------------------------
-FEATURES = {f.strip() for f in os.environ.get("DASH_FEATURES", "research,cfb,nhl,upsets").split(",") if f.strip()}
+FEATURES = {f.strip() for f in os.environ.get("DASH_FEATURES", "research,cfb,nhl,upsets,trades").split(",") if f.strip()}
 
 
 def feature_on(name: str) -> bool:
@@ -4035,3 +4035,12 @@ if feature_on("upsets"):
     @app.on_event("startup")
     def _upsets_start():
         _upsets.start()
+
+
+# ---------------------------------------------------------------------------
+# NFL trade forecasts (crowd guesses on Kalshi KXNFLTRADE) — see trades.py
+# ---------------------------------------------------------------------------
+if feature_on("trades"):
+    import trades as _trades
+    _trades.configure(_verify_trade_token)
+    app.include_router(_trades.router)

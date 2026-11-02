@@ -1,6 +1,7 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react'
 import { mlbLocks, mlbInningLegs, mlbGameLegs } from './mlbRules.js'
 import UpsetsTab from './UpsetsTab.jsx'
+import TradesTab from './TradesTab.jsx'
 
 export const API = window.location.hostname === 'localhost'
   ? ''  // proxied via vite dev server
@@ -5405,11 +5406,12 @@ const ALL_TABS = [
   { id: 'mlb',      label: '⚾ Board',     el: () => <MLBBoardTab /> },
   { id: 'nhl',      label: '🏒 Leafs',     el: () => <NHLTab /> },
   { id: 'upsets',   label: '🎓 Upsets',    el: () => <UpsetsTab /> },
+  { id: 'trades',   label: '🏈 Trades',    el: () => <TradesTab /> },
   { id: 'spring',   label: '🌸 Odds',      el: () => <SpringOddsTab /> },
   { id: 'hr',       label: '💣 HR',        el: () => <HRScannerTab /> },
   { id: 'ff',       label: '🏈 FF',        el: () => <FantasyTab /> },
 ]
-const ENABLED_TABS = ['research', 'cfb', 'nhl', 'upsets']
+const ENABLED_TABS = ['research', 'cfb', 'nhl', 'upsets', 'trades']
 const TABS = ALL_TABS.filter(t => ENABLED_TABS.includes(t.id))
 
 export default function App() {
