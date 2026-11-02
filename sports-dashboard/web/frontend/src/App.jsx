@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useEffect, useMemo } from 'react'
+import { Component, useState, useCallback, useRef, useEffect, useMemo } from 'react'
 import { mlbLocks, mlbInningLegs, mlbGameLegs } from './mlbRules.js'
 import UpsetsTab from './UpsetsTab.jsx'
 import TradesTab from './TradesTab.jsx'
@@ -5414,6 +5414,28 @@ const ALL_TABS = [
 const ENABLED_TABS = ['research', 'cfb', 'nhl', 'upsets', 'trades']
 const TABS = ALL_TABS.filter(t => ENABLED_TABS.includes(t.id))
 
+// A tab that throws while rendering must not blank the whole app (which also
+// traps the user: the crashing tab is remembered in localStorage and comes back
+// on every reload). Show the error and offer a way out instead.
+class TabErrorBoundary extends Component {
+  constructor(props) { super(props); this.state = { error: null } }
+  static getDerivedStateFromError(error) { return { error } }
+  componentDidCatch(error, info) { console.error('[dash] tab crashed', error, info?.componentStack) }
+  render() {
+    if (!this.state.error) return this.props.children
+    const e = this.state.error
+    return (
+      <div style={{ background: '#1e293b', border: '1px solid #7f1d1d', borderRadius: 12, padding: 14 }}>
+        <div style={{ fontSize: 13, fontWeight: 700, color: '#fca5a5', marginBottom: 6 }}>This tab hit an error</div>
+        <pre style={{ fontSize: 11, color: '#e2e8f0', whiteSpace: 'pre-wrap', wordBreak: 'break-word', margin: '0 0 10px', maxHeight: 180, overflow: 'auto' }}>{String(e?.message || e)}{'\n'}{String(e?.stack || '').split('\n').slice(1, 4).join('\n')}</pre>
+        <button onClick={() => { localStorage.removeItem('dash_tab'); this.props.onReset?.() }} style={{ padding: '8px 12px', borderRadius: 8, border: 'none', background: '#2563eb', color: '#fff', fontSize: 12, fontWeight: 600 }}>
+          Back to {this.props.homeLabel}
+        </button>
+      </div>
+    )
+  }
+}
+
 export default function App() {
   const [tab, setTab] = useState(() => {
     const saved = localStorage.getItem('dash_tab')
@@ -5444,7 +5466,7 @@ export default function App() {
         ))}
       </div>
 
-      {active.el()}
+      <TabErrorBoundary key={active.id} homeLabel={TABS[0].label} onReset={() => setTab(TABS[0].id)}>{active.el()}</TabErrorBoundary>
 
       <style>{`
         * { box-sizing: border-box; }
