@@ -16,6 +16,7 @@ const btn = (extra = {}) => ({
   fontSize: 13, fontWeight: 600, cursor: 'pointer', ...extra,
 })
 const when = iso => iso ? new Date(iso).toLocaleString('en-US', { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' }) + ' ET' : '–'
+const QUICK = [0, 25, 50, 75, 100]
 const pctColor = p => p == null ? C.dim : p >= 60 ? C.green : p >= 25 ? C.amber : C.muted
 
 export default function TradesTab() {
@@ -130,19 +131,36 @@ export default function TradesTab() {
           <span style={{ color: C.dim, textTransform: 'none', letterSpacing: 0 }}>{filled} filled</span>
         </div>
         <input value={filter} onChange={e => setFilter(e.target.value)} placeholder="Find a player…" style={{ ...inp, marginBottom: 10 }} />
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
           {shown.map(p => {
             const v = draft[p.ticker] ?? ''
             const dirty = v !== '' && saved[p.ticker] !== v
+            const col = pctColor(v === '' ? null : v)
             return (
-              <div key={p.ticker} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 64px', alignItems: 'center', gap: 10, padding: '8px 10px', borderRadius: 10, background: C.bg, border: `1px solid ${dirty ? C.blue : C.line}` }}>
-                <div style={{ fontSize: 14, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.player}</div>
-                <input type="range" min={0} max={100} step={1} value={v === '' ? 0 : v} onChange={e => setPct(p.ticker, e.target.value)} style={{ width: '100%', accentColor: pctColor(v === '' ? null : v) }} />
-                <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-                  <input inputMode="numeric" pattern="[0-9]*" value={v} onChange={e => setPct(p.ticker, e.target.value.replace(/[^0-9]/g, ''))} placeholder="–"
-                    style={{ ...inp, width: 48, padding: '6px 4px', textAlign: 'right', color: pctColor(v === '' ? null : v), fontWeight: 700 }} />
-                  <span style={{ fontSize: 12, color: C.dim }}>%</span>
+              <div key={p.ticker} style={{ padding: '12px 12px 10px', borderRadius: 12, background: C.bg, border: `1px solid ${dirty ? C.blue : C.line}` }}>
+                <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10 }}>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: 16, fontWeight: 700, lineHeight: 1.2 }}>{p.player}</div>
+                    <div style={{ fontSize: 12, color: C.muted, marginTop: 3 }}>
+                      {p.team ? <span style={{ color: C.text, fontWeight: 600 }}>{p.team}</span> : <span style={{ color: C.dim }}>team n/a</span>}
+                      {p.pos && <span> · {p.pos}</span>}
+                    </div>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 2, flexShrink: 0 }}>
+                    <input inputMode="numeric" pattern="[0-9]*" value={v} onChange={e => setPct(p.ticker, e.target.value.replace(/[^0-9]/g, ''))} placeholder="–"
+                      style={{ ...inp, width: 58, padding: '8px 6px', textAlign: 'right', color: col, fontWeight: 800, fontSize: 18 }} />
+                    <span style={{ fontSize: 14, color: C.dim }}>%</span>
+                  </div>
                 </div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 6, marginTop: 10 }}>
+                  {QUICK.map(q => (
+                    <button key={q} onClick={() => setPct(p.ticker, q)} style={{
+                      padding: '9px 0', borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: 'pointer',
+                      border: `1px solid ${v === q ? C.blue : C.line}`, background: v === q ? C.blue : C.panel, color: v === q ? '#fff' : C.muted,
+                    }}>{q}</button>
+                  ))}
+                </div>
+                <input type="range" min={0} max={100} step={1} value={v === '' ? 0 : v} onChange={e => setPct(p.ticker, e.target.value)} style={{ width: '100%', marginTop: 10, accentColor: col }} />
               </div>
             )
           })}

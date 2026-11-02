@@ -8,7 +8,7 @@ is set; see sql/trade_forecasts.sql), together with the Kalshi bid/ask at that
 moment so the guesses can be scored against the market later. The bid/ask never leaves the server through the public routes.
 
 Routes
-  GET  /api/trades/players          players (name + ticker only), event, deadline
+  GET  /api/trades/players          players (name, current team/pos, ticker; no prices), deadline
   GET  /api/trades/mine?user=       the caller's latest guess per player
   POST /api/trades/forecast         {user, passcode?, forecasts:{ticker: pct}}
   GET  /api/trades/summary          per-player mean/median/n + market (trade token)
@@ -29,6 +29,7 @@ import os
 import re
 import statistics
 import threading
+import unicodedata
 import time
 import urllib.request
 from datetime import datetime, timezone
@@ -115,6 +116,54 @@ def _load_markets(force: bool = False) -> Dict[str, Any]:
         out.sort(key=lambda m: m["player"].split()[-1].lower() if m["player"] else "")
         _cache.update(at=time.time(), event=ev, markets=out)
         return _cache
+
+
+# ── Current teams (Sleeper's free NFL player list, cached 12h) ──────────────
+# Kalshi gives names only. Sleeper's dump is ~14 MB, so it is reduced to a small
+# name -> (team, position) index once and the raw payload dropped.
+
+SLEEPER_URL = "https://api.sleeper.app/v1/players/nfl"
+TEAM_CACHE_SECS = 12 * 3600
+_teams: Dict[str, Any] = {"at": 0.0, "exact": {}, "loose": {}}
+
+
+def _norm(name: str, strip_suffix: bool) -> str:
+    n = unicodedata.normalize("NFKD", name or "").encode("ascii", "ignore").decode().lower()
+    n = n.replace("'", "").replace(".", "")
+    if strip_suffix:
+        n = re.sub(r"\b(jr|sr|ii|iii|iv|v)\b", "", n)
+    return re.sub(r"[^a-z ]", "", n).strip()
+
+
+def _team_index() -> Dict[str, Dict[str, list]]:
+    with _lock:
+        if _teams["exact"] and time.time() - _teams["at"] < TEAM_CACHE_SECS:
+            return _teams
+    try:
+        raw = _get_json(SLEEPER_URL, timeout=90)
+    except Exception as e:  # noqa: BLE001
+        print(f"[trades] sleeper fetch failed: {e}")
+        return _teams
+    exact: Dict[str, list] = {}
+    loose: Dict[str, list] = {}
+    for pl in raw.values():
+        if not isinstance(pl, dict) or not pl.get("full_name") or not pl.get("active"):
+            continue
+        row = (pl.get("team") or "FA", pl.get("position") or "", pl.get("search_rank") or 10**9)
+        exact.setdefault(_norm(pl["full_name"], False), []).append(row)
+        loose.setdefault(_norm(pl["full_name"], True), []).append(row)
+    with _lock:
+        _teams.update(at=time.time(), exact=exact, loose=loose)
+    return _teams
+
+
+def _team_for(name: str) -> Dict[str, Optional[str]]:
+    idx = _team_index()
+    hits = idx["exact"].get(_norm(name, False)) or idx["loose"].get(_norm(name, True)) or []
+    if not hits:
+        return {"team": None, "pos": None}
+    team, pos, _ = min(hits, key=lambda h: h[2])     # best search_rank = the famous one
+    return {"team": team, "pos": pos}
 
 
 # ── Storage: SQLite file (default) or Postgres via DATABASE_URL ─────────────
@@ -253,7 +302,7 @@ def players():
         "closes": closes,
         "passcode_required": bool(os.getenv("TRADE_FORECAST_PASSCODE")),
         # names only — no prices on the public page
-        "players": [{"ticker": m["ticker"], "player": m["player"]} for m in active],
+        "players": [{"ticker": m["ticker"], "player": m["player"], **_team_for(m["player"])} for m in active],
         "settled": [{"ticker": m["ticker"], "player": m["player"], "result": m["result"]} for m in settled],
     }
 
