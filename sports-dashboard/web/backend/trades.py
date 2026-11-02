@@ -13,25 +13,37 @@ Routes
   POST /api/trades/forecast         {user, passcode?, forecasts:{ticker: pct}, notes?:{ticker: text}}
   GET  /api/trades/summary          per-player mean/median/n + market (trade token)
   GET  /api/trades/export           every stored row as CSV (trade token)
+  POST /api/trades/submit           email the caller's guesses as a CSV to the owner
+                                    (Resend or SMTP; if neither is configured the CSV
+                                    comes back so the page can open a mailto: instead)
 
 Env
   TRADE_FORECAST_EVENT    event ticker (default: open KXNFLTRADE event, nearest close)
   TRADE_FORECAST_PASSCODE if set, submits must carry it (shared word for the group)
   TRADE_FORECAST_DEADLINE ISO time shown as the deadline (default: 2026-11-10T21:00:00Z)
+  TRADE_FORECAST_TO       where /submit mails the CSV (default jordan@beebettor.com)
+  RESEND_API_KEY          send through Resend (from RESEND_FROM, default onboarding@resend.dev)
+  SMTP_HOST/PORT/USER/PASS/FROM  or send through SMTP (STARTTLS unless SMTP_TLS=0)
   TRADE_FORECAST_DB       SQLite path (default ./data/trade_forecasts.sqlite; on Render use a disk, e.g. /var/data/...)
   DATABASE_URL            if set, use this Postgres instead of SQLite (needs psycopg)
 """
 from __future__ import annotations
 
+import base64
+import csv
 import gzip
+import io
 import json
+import smtplib
 import os
 import re
 import statistics
 import threading
 import unicodedata
 import time
+import urllib.error
 import urllib.request
+from email.message import EmailMessage
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
@@ -427,3 +439,117 @@ def export_csv(request: Request):
         w.writerow([r[k] for k in cols])
     return PlainTextResponse(buf.getvalue(), media_type="text/csv",
                              headers={"Content-Disposition": f'attachment; filename="trade_forecasts_{ev}.csv"'})
+
+
+# ── Submit: email the guesses as a CSV ──────────────────────────────────────
+
+MAIL_TO = os.getenv("TRADE_FORECAST_TO", "jordan@beebettor.com")
+
+
+def _csv_for(user: str, ev: str, rows: List[Dict[str, Any]]) -> str:
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["forecaster", "event_ticker", "market_ticker", "player", "team", "pos", "pct", "note", "submitted_at"])
+    for r in rows:
+        w.writerow([user, ev, r["market_ticker"], r["player"], r.get("team") or "", r.get("pos") or "", r["pct"], r.get("note") or "", r["submitted_at"]])
+    return buf.getvalue()
+
+
+def _mail_backend() -> Optional[str]:
+    if os.getenv("RESEND_API_KEY"):
+        return "resend"
+    if os.getenv("SMTP_HOST") and os.getenv("SMTP_USER") and os.getenv("SMTP_PASS"):
+        return "smtp"
+    return None
+
+
+def _send_mail(subject: str, body: str, filename: str, csv_text: str) -> str:
+    backend = _mail_backend()
+    if backend == "resend":
+        payload = {
+            "from": os.getenv("RESEND_FROM", "Trade Forecasts <onboarding@resend.dev>"),
+            "to": [MAIL_TO], "subject": subject, "text": body,
+            "attachments": [{"filename": filename, "content": base64.b64encode(csv_text.encode()).decode()}],
+        }
+        req = urllib.request.Request("https://api.resend.com/emails", data=json.dumps(payload).encode(), method="POST",
+                                     headers={"Authorization": f"Bearer {os.environ['RESEND_API_KEY']}", "Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            raise HTTPException(502, f"Resend refused the email: {e.read().decode()[:200]}")
+        return "resend"
+    if backend == "smtp":
+        msg = EmailMessage()
+        msg["From"] = os.getenv("SMTP_FROM", os.environ["SMTP_USER"])
+        msg["To"] = MAIL_TO
+        msg["Subject"] = subject
+        msg.set_content(body)
+        msg.add_attachment(csv_text.encode(), maintype="text", subtype="csv", filename=filename)
+        host, port = os.environ["SMTP_HOST"], int(os.getenv("SMTP_PORT", "587"))
+        try:
+            with smtplib.SMTP(host, port, timeout=30) as smtp:
+                if os.getenv("SMTP_TLS", "1") != "0":
+                    smtp.starttls()
+                smtp.login(os.environ["SMTP_USER"], os.environ["SMTP_PASS"])
+                smtp.send_message(msg)
+        except (smtplib.SMTPException, OSError) as e:
+            raise HTTPException(502, f"SMTP send failed: {str(e)[:200]}")
+        return "smtp"
+    raise HTTPException(503, "No email service configured.")
+
+
+class SubmitIn(ForecastIn):
+    pass
+
+
+@router.post("/submit")
+def submit(body: SubmitIn):
+    """Email the caller's guesses to the owner as a CSV. Also stores them (best effort)."""
+    user = _clean_user(body.user)
+    need = os.getenv("TRADE_FORECAST_PASSCODE", "")
+    if need and body.passcode.strip() != need:
+        raise HTTPException(401, "Wrong passcode.")
+    c = _load_markets()
+    ev = c["event"]["event_ticker"]
+    by_ticker = {m["ticker"]: m for m in c["markets"] if m["status"] == "active"}
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    rows = []
+    for ticker, pct in body.forecasts.items():
+        m = by_ticker.get(ticker)
+        if not m:
+            continue
+        if not isinstance(pct, int) or not 0 <= pct <= 100:
+            raise HTTPException(400, f"{m['player']}: chance must be a whole number 0-100.")
+        rows.append({
+            "event_ticker": ev, "market_ticker": ticker, "player": m["player"], **_team_for(m["player"]),
+            "forecaster": user, "pct": pct, "market_bid": m["bid"], "market_ask": m["ask"],
+            "note": (body.notes.get(ticker) or "").strip()[:500] or None, "submitted_at": now,
+        })
+    if not rows:
+        raise HTTPException(400, "Nothing to send — set a chance on at least one player.")
+    rows.sort(key=lambda r: -r["pct"])
+    stored = True
+    try:
+        _store.insert(rows)          # backup copy; the email is the deliverable
+    except Exception as e:  # noqa: BLE001
+        stored = False
+        print(f"[trades] backup store failed: {e}")
+
+    csv_text = _csv_for(user, ev, rows)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
+    safe_user = re.sub(r"[^A-Za-z0-9_-]+", "_", user)[:30]
+    filename = f"trade_forecasts_{safe_user}_{stamp}.csv"
+    subject = f"Trade forecasts from {user} ({len(rows)} players)"
+    noted = [r for r in rows if r["note"]]
+    body_lines = [f"{user} submitted {len(rows)} guesses for {ev}.", "", "Top of the list:"]
+    body_lines += [f"  {r['pct']:>3}%  {r['player']} ({r.get('team') or '?'})" for r in rows[:10]]
+    if noted:
+        body_lines += ["", "Notes:"] + [f"  {r['player']}: {r['note']}" for r in noted]
+    body_lines += ["", "Full CSV attached."]
+    if _mail_backend():
+        via = _send_mail(subject, "\n".join(body_lines), filename, csv_text)
+        return {"ok": True, "emailed": True, "via": via, "to": MAIL_TO, "rows": len(rows), "stored": stored, "user": user, "at": now}
+    # no mail service on the server: hand the CSV back so the page can open the mail app
+    return {"ok": True, "emailed": False, "to": MAIL_TO, "rows": len(rows), "stored": stored, "user": user, "at": now,
+            "subject": subject, "csv": csv_text, "filename": filename}

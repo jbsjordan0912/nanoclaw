@@ -95,20 +95,30 @@ export default function TradesTab() {
   }, [draft, saved, notes, savedNotes])
   const filled = Object.values(draft).filter(v => v !== '' && v != null).length
 
+  const [fallback, setFallback] = useState(null)   // { href, csv, to } when the server has no mail service
+
   const submit = async () => {
     if (!user.trim()) { setMsg({ text: 'Enter a name or handle first so your guesses have an owner.', err: true }); return }
-    const forecasts = Object.keys(changed).length ? changed : Object.fromEntries(Object.entries(draft).filter(([, v]) => v !== '' && v != null))
+    const forecasts = Object.fromEntries(Object.entries(draft).filter(([, v]) => v !== '' && v != null))
     if (!Object.keys(forecasts).length) { setMsg({ text: 'Set a chance on at least one player.', err: true }); return }
-    setBusy(true); setMsg(null)
+    setBusy(true); setMsg(null); setFallback(null)
     try {
-      const r = await fetch(`${API}/api/trades/forecast`, {
+      const r = await fetch(`${API}/api/trades/submit`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ user: user.trim(), passcode, forecasts, notes: Object.fromEntries(Object.keys(forecasts).map(t => [t, noteOf(t)])) }),
       })
       const d = await r.json()
       if (!r.ok) throw new Error(d.detail || r.status)
       setSaved(s => ({ ...s, ...forecasts })); setSavedNotes(n => ({ ...n, ...Object.fromEntries(Object.keys(forecasts).map(t => [t, noteOf(t)])) })); setLastAt(d.at)
-      setMsg({ text: `Saved ${d.saved} guess${d.saved === 1 ? '' : 'es'} for ${d.user}. Come back and change them any time before the deadline.`, err: false })
+      if (d.emailed) {
+        setMsg({ text: `Sent ${d.rows} guess${d.rows === 1 ? '' : 'es'} from ${d.user} to ${d.to}. Revise and submit again any time before the deadline.`, err: false })
+      } else {
+        // no mail service on the server yet: open the mail app with the CSV in the body
+        const href = `mailto:${d.to}?subject=${encodeURIComponent(d.subject)}&body=${encodeURIComponent(d.csv)}`
+        setFallback({ href, csv: d.csv, to: d.to })
+        setMsg({ text: `Your ${d.rows} guess${d.rows === 1 ? '' : 'es'} are ready. Tap "Open mail" to send them to ${d.to}.`, err: false })
+        window.location.href = href
+      }
     } catch (e) { setMsg({ text: String(e.message || e), err: true }) }
     finally { setBusy(false) }
   }
@@ -122,7 +132,7 @@ export default function TradesTab() {
         <div style={h2}><span>{meta.title}</span><span style={{ color: C.dim, textTransform: 'none', letterSpacing: 0 }}>deadline {when(meta.closes)}</span></div>
         <p style={{ fontSize: 13, color: C.muted, margin: '0 0 10px', lineHeight: 1.45 }}>
           For each player, what is the % chance they are <b style={{ color: C.text }}>traded before the NFL deadline</b>?
-          Guess from your own read, not from odds. You can come back and revise; the newest guess counts.
+          Guess from your own read, not from odds. Tap Submit when you're done and your guesses are emailed to Jordan as a spreadsheet. You can come back and revise; the newest submission counts.
         </p>
         <label style={{ fontSize: 11, color: C.muted }}>Your name or handle</label>
         <input value={user} onChange={e => setUser(e.target.value)} placeholder="e.g. jordan, @handle" maxLength={40} style={{ ...inp, marginTop: 4 }} autoCapitalize="off" autoCorrect="off" />
@@ -132,7 +142,7 @@ export default function TradesTab() {
             <input value={passcode} onChange={e => setPasscode(e.target.value)} placeholder="the word you were sent" style={{ ...inp, marginTop: 4 }} autoCapitalize="off" autoCorrect="off" />
           </>
         )}
-        {lastAt && <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}>Last saved {when(lastAt)} · {Object.keys(saved).length} of {players.length} players</div>}
+        {lastAt && <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}>Last submitted {when(lastAt)} · {Object.keys(saved).length} of {players.length} players</div>}
       </div>
 
       <div style={panel}>
@@ -205,8 +215,14 @@ export default function TradesTab() {
 
       <div style={{ position: 'sticky', bottom: 12, background: C.panel, border: `1px solid ${C.line}`, borderRadius: 12, padding: 10, boxShadow: '0 -6px 24px rgba(0,0,0,0.4)' }}>
         {msg && <div style={{ fontSize: 12, color: msg.err ? C.red : C.green, marginBottom: 8 }}>{msg.text}</div>}
+        {fallback && (
+          <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+            <a href={fallback.href} style={{ ...btn({ flex: 1, textAlign: 'center', textDecoration: 'none', background: C.green, border: 'none', color: '#052e16' }) }}>Open mail</a>
+            <button onClick={() => navigator.clipboard?.writeText(fallback.csv).then(() => setMsg({ text: `CSV copied — paste it into an email to ${fallback.to}.`, err: false }))} style={btn({ flex: 1 })}>Copy CSV</button>
+          </div>
+        )}
         <button onClick={submit} disabled={busy || !filled} style={btn({ width: '100%', background: filled ? C.blue : C.bg, border: 'none', color: filled ? '#fff' : C.dim, opacity: busy ? 0.6 : 1 })}>
-          {busy ? 'Saving…' : Object.keys(changed).length ? `Save ${Object.keys(changed).length} changed guess${Object.keys(changed).length === 1 ? '' : 'es'}` : filled ? 'Save guesses' : 'Set a few chances to save'}
+          {busy ? 'Sending…' : filled ? `Submit ${filled} guess${filled === 1 ? '' : 'es'}${Object.keys(changed).length ? ` (${Object.keys(changed).length} changed)` : ''}` : 'Set a few chances to submit'}
         </button>
       </div>
     </div>
