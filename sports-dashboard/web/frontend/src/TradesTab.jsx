@@ -18,6 +18,13 @@ const btn = (extra = {}) => ({
 const when = iso => iso ? new Date(iso).toLocaleString('en-US', { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' }) + ' ET' : '–'
 const QUICK = [0, 25, 50, 75, 100]
 const NUDGE = [-10, -5, 5, 10]
+// Safari reports any non-2xx/aborted fetch as a bare 'Load failed'; turn responses into readable errors
+const readJson = async r => {
+  const text = await r.text()
+  let d = null; try { d = JSON.parse(text) } catch { /* html error page, proxy timeout, ... */ }
+  if (!r.ok) throw new Error((d && d.detail) || `${r.status} ${r.statusText || 'server error'}`.trim())
+  return d
+}
 const pctColor = p => p == null ? C.dim : p >= 60 ? C.green : p >= 25 ? C.amber : C.muted
 
 export default function TradesTab() {
@@ -40,31 +47,32 @@ export default function TradesTab() {
   useEffect(() => { localStorage.setItem('trade_passcode', passcode) }, [passcode])
 
   // players (names only)
+  const [attempt, setAttempt] = useState(0)
   useEffect(() => {
     let dead = false
     ;(async () => {
       try {
-        const r = await fetch(`${API}/api/trades/players`)
-        const d = await r.json()
-        if (!r.ok) throw new Error(d.detail || r.status)
+        const d = await readJson(await fetch(`${API}/api/trades/players`))
         if (!dead) { setMeta(d); setDown('') }
-      } catch (e) { if (!dead) setDown(String(e.message || e)) }
+      } catch (e) {
+        if (dead) return
+        setDown(String(e.message || e))
+        if (attempt < 5) setTimeout(() => !dead && setAttempt(a => a + 1), 4000 * (attempt + 1))   // Kalshi throttles in bursts; try again
+      }
     })()
     return () => { dead = true }
-  }, [])
+  }, [attempt])
 
   // my previous guesses, once I have a name
   const loadMine = useCallback(async (u) => {
     if (!u.trim()) { setSaved({}); setLastAt(null); return }
     try {
-      const r = await fetch(`${API}/api/trades/mine?user=${encodeURIComponent(u.trim())}`)
-      const d = await r.json()
-      if (!r.ok) throw new Error(d.detail || r.status)
+      const d = await readJson(await fetch(`${API}/api/trades/mine?user=${encodeURIComponent(u.trim())}`))
       setSaved(d.forecasts || {}); setSavedNotes(d.notes || {}); setLastAt(d.last_submitted || null)
       setDraft(prev => ({ ...d.forecasts, ...prev }))
       setNotes(prev => ({ ...(d.notes || {}), ...prev }))
       setNoteOpen(prev => ({ ...Object.fromEntries(Object.keys(d.notes || {}).map(k => [k, true])), ...prev }))
-    } catch (e) { setMsg({ text: `Could not load your earlier guesses: ${e.message || e}`, err: true }) }
+    } catch (e) { setMsg({ text: `Couldn't load your earlier guesses (${e.message || e}). You can still submit.`, err: false }) }
   }, [])
   useEffect(() => { const t = setTimeout(() => loadMine(user), 400); return () => clearTimeout(t) }, [user, loadMine])
 
@@ -107,8 +115,7 @@ export default function TradesTab() {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ user: user.trim(), passcode, forecasts, notes: Object.fromEntries(Object.keys(forecasts).map(t => [t, noteOf(t)])) }),
       })
-      const d = await r.json()
-      if (!r.ok) throw new Error(d.detail || r.status)
+      const d = await readJson(r)
       setSaved(s => ({ ...s, ...forecasts })); setSavedNotes(n => ({ ...n, ...Object.fromEntries(Object.keys(forecasts).map(t => [t, noteOf(t)])) })); setLastAt(d.at)
       if (d.emailed) {
         setMsg({ text: `Sent ${d.rows} guess${d.rows === 1 ? '' : 'es'} from ${d.user} to ${d.to}. Revise and submit again any time before the deadline.`, err: false })
@@ -123,7 +130,7 @@ export default function TradesTab() {
     finally { setBusy(false) }
   }
 
-  if (down) return <div style={{ ...panel, color: C.red }}>Trade board unavailable: {down}</div>
+  if (down && !meta) return <div style={{ ...panel, color: C.amber }}>Couldn't load the player list ({down}).{attempt < 5 ? ' Retrying…' : ''} <button onClick={() => setAttempt(a => a + 1)} style={{ ...btn({ marginLeft: 8, padding: '4px 8px' }) }}>Try again</button></div>
   if (!meta) return <div style={{ ...panel, color: C.dim }}>Loading players…</div>
 
   return (

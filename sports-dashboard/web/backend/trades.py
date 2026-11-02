@@ -60,7 +60,8 @@ DEFAULT_DEADLINE = "2026-11-10T21:00:00Z"   # 2026 NFL trade deadline, 4pm ET
 
 _verify_token: Callable[[str], bool] = lambda t: False   # injected by main.py
 _lock = threading.Lock()
-_cache: Dict[str, Any] = {"at": 0.0, "event": None, "markets": []}
+_cache: Dict[str, Any] = {"at": 0.0, "event": None, "event_at": 0.0, "markets": []}
+EVENT_CACHE_SECS = 12 * 3600
 
 
 def configure(verify_trade_token: Callable[[str], bool]) -> None:
@@ -90,44 +91,62 @@ def _pick_event() -> Dict[str, Any]:
     forced = os.getenv("TRADE_FORECAST_EVENT", "").strip()
     if forced:
         return {"event_ticker": forced, "title": forced}
-    d = _get_json(f"{KALSHI}/events?series_ticker={SERIES}&status=open&limit=50")
+    # One call: open events with their markets nested, pick the one closing soonest
+    # (deadline window vs the offseason windows that are open at the same time).
+    d = _get_json(f"{KALSHI}/events?series_ticker={SERIES}&status=open&with_nested_markets=true&limit=50")
     events = d.get("events") or []
     if not events:
         raise HTTPException(503, "No open NFL trade event on Kalshi right now.")
-    # Several may be open (deadline + offseason windows); take the one closing soonest.
-    def close_key(e):
-        ms = _get_json(f"{KALSHI}/markets?event_ticker={e['event_ticker']}&limit=1").get("markets") or []
-        return ms[0].get("close_time", "9") if ms else "9"
-    events.sort(key=close_key)
-    return events[0]
+    def soonest(e):
+        closes = [m.get("close_time") for m in (e.get("markets") or []) if m.get("status") == "active" and m.get("close_time")]
+        return min(closes) if closes else "9"
+    events.sort(key=soonest)
+    ev = events[0]
+    return {"event_ticker": ev["event_ticker"], "title": ev.get("title")}
 
 
 def _load_markets(force: bool = False) -> Dict[str, Any]:
+    """Players + prices from Kalshi, cached. If Kalshi fails (it rate-limits this
+    host: the other boards poll it too) keep serving the last good copy."""
     with _lock:
-        if not force and _cache["markets"] and time.time() - _cache["at"] < CACHE_SECS:
+        fresh = _cache["markets"] and time.time() - _cache["at"] < CACHE_SECS
+        if not force and fresh:
             return _cache
-        ev = _pick_event()
-        out: List[Dict[str, Any]] = []
-        cursor = ""
-        while True:
-            url = f"{KALSHI}/markets?event_ticker={ev['event_ticker']}&limit=200" + (f"&cursor={cursor}" if cursor else "")
-            d = _get_json(url)
-            for m in d.get("markets") or []:
-                out.append({
-                    "ticker": m["ticker"],
-                    "player": m.get("yes_sub_title") or m.get("subtitle") or m["ticker"].split("-")[-1],
-                    "status": m.get("status"),
-                    "result": m.get("result") or "",
-                    "close_time": m.get("close_time"),
-                    "bid": _cents(m.get("yes_bid_dollars")),
-                    "ask": _cents(m.get("yes_ask_dollars")),
-                })
-            cursor = d.get("cursor") or ""
-            if not cursor:
-                break
-        out.sort(key=lambda m: m["player"].split()[-1].lower() if m["player"] else "")
-        _cache.update(at=time.time(), event=ev, markets=out)
-        return _cache
+        try:
+            if _cache["event"] and time.time() - _cache["event_at"] < EVENT_CACHE_SECS:
+                ev = _cache["event"]
+            else:
+                ev = _pick_event()
+                _cache.update(event=ev, event_at=time.time())
+            out: List[Dict[str, Any]] = []
+            cursor = ""
+            while True:
+                url = f"{KALSHI}/markets?event_ticker={ev['event_ticker']}&limit=200" + (f"&cursor={cursor}" if cursor else "")
+                d = _get_json(url)
+                for m in d.get("markets") or []:
+                    out.append({
+                        "ticker": m["ticker"],
+                        "player": m.get("yes_sub_title") or m.get("subtitle") or m["ticker"].split("-")[-1],
+                        "status": m.get("status"),
+                        "result": m.get("result") or "",
+                        "close_time": m.get("close_time"),
+                        "bid": _cents(m.get("yes_bid_dollars")),
+                        "ask": _cents(m.get("yes_ask_dollars")),
+                    })
+                cursor = d.get("cursor") or ""
+                if not cursor:
+                    break
+            out.sort(key=lambda m: m["player"].split()[-1].lower() if m["player"] else "")
+            _cache.update(at=time.time(), markets=out)
+            return _cache
+        except HTTPException:
+            raise
+        except Exception as e:  # noqa: BLE001  (429s, timeouts, bad JSON)
+            if _cache["markets"]:
+                print(f"[trades] kalshi refresh failed, serving cached list: {str(e)[:120]}")
+                _cache["at"] = time.time() - CACHE_SECS + 60   # retry in a minute, not on every request
+                return _cache
+            raise HTTPException(503, "Kalshi is rate-limiting this server right now. Try again in a minute.")
 
 
 # ── Current teams (Sleeper's free NFL player list, cached 12h) ──────────────
