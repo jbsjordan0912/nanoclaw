@@ -17,6 +17,7 @@ const btn = (extra = {}) => ({
 })
 const when = iso => iso ? new Date(iso).toLocaleString('en-US', { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' }) + ' ET' : '–'
 const QUICK = [0, 25, 50, 75, 100]
+const NUDGE = [-10, -5, 5, 10]
 const pctColor = p => p == null ? C.dim : p >= 60 ? C.green : p >= 25 ? C.amber : C.muted
 
 export default function TradesTab() {
@@ -26,6 +27,9 @@ export default function TradesTab() {
   const [passcode, setPasscode] = useState(() => localStorage.getItem('trade_passcode') || '')
   const [draft, setDraft] = useState({})          // ticker -> number | ''
   const [saved, setSaved] = useState({})          // ticker -> number (last stored)
+  const [notes, setNotes] = useState({})          // ticker -> text (draft)
+  const [savedNotes, setSavedNotes] = useState({})
+  const [noteOpen, setNoteOpen] = useState({})    // ticker -> bool
   const [lastAt, setLastAt] = useState(null)
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState(null)            // { text, err }
@@ -56,8 +60,10 @@ export default function TradesTab() {
       const r = await fetch(`${API}/api/trades/mine?user=${encodeURIComponent(u.trim())}`)
       const d = await r.json()
       if (!r.ok) throw new Error(d.detail || r.status)
-      setSaved(d.forecasts || {}); setLastAt(d.last_submitted || null)
+      setSaved(d.forecasts || {}); setSavedNotes(d.notes || {}); setLastAt(d.last_submitted || null)
       setDraft(prev => ({ ...d.forecasts, ...prev }))
+      setNotes(prev => ({ ...(d.notes || {}), ...prev }))
+      setNoteOpen(prev => ({ ...Object.fromEntries(Object.keys(d.notes || {}).map(k => [k, true])), ...prev }))
     } catch (e) { setMsg({ text: `Could not load your earlier guesses: ${e.message || e}`, err: true }) }
   }, [])
   useEffect(() => { const t = setTimeout(() => loadMine(user), 400); return () => clearTimeout(t) }, [user, loadMine])
@@ -75,14 +81,18 @@ export default function TradesTab() {
     setDraft(d => ({ ...d, [ticker]: n }))
   }
 
+  const nudge = (ticker, d) => setPct(ticker, (draft[ticker] === '' || draft[ticker] == null ? 0 : draft[ticker]) + d)
+  const noteOf = t => (notes[t] || '').trim()
+
+  // a guess counts as changed when its % or its note differs from what is stored
   const changed = useMemo(() => {
     const out = {}
     for (const [t, v] of Object.entries(draft)) {
       if (v === '' || v == null) continue
-      if (saved[t] !== v) out[t] = v
+      if (saved[t] !== v || (notes[t] || '').trim() !== (savedNotes[t] || '').trim()) out[t] = v
     }
     return out
-  }, [draft, saved])
+  }, [draft, saved, notes, savedNotes])
   const filled = Object.values(draft).filter(v => v !== '' && v != null).length
 
   const submit = async () => {
@@ -93,11 +103,11 @@ export default function TradesTab() {
     try {
       const r = await fetch(`${API}/api/trades/forecast`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ user: user.trim(), passcode, forecasts }),
+        body: JSON.stringify({ user: user.trim(), passcode, forecasts, notes: Object.fromEntries(Object.keys(forecasts).map(t => [t, noteOf(t)])) }),
       })
       const d = await r.json()
       if (!r.ok) throw new Error(d.detail || r.status)
-      setSaved(s => ({ ...s, ...forecasts })); setLastAt(d.at)
+      setSaved(s => ({ ...s, ...forecasts })); setSavedNotes(n => ({ ...n, ...Object.fromEntries(Object.keys(forecasts).map(t => [t, noteOf(t)])) })); setLastAt(d.at)
       setMsg({ text: `Saved ${d.saved} guess${d.saved === 1 ? '' : 'es'} for ${d.user}. Come back and change them any time before the deadline.`, err: false })
     } catch (e) { setMsg({ text: String(e.message || e), err: true }) }
     finally { setBusy(false) }
@@ -160,7 +170,21 @@ export default function TradesTab() {
                     }}>{q}</button>
                   ))}
                 </div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 6, marginTop: 6 }}>
+                  {NUDGE.map(d => (
+                    <button key={d} onClick={() => nudge(p.ticker, d)} style={{
+                      padding: '8px 0', borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: 'pointer',
+                      border: `1px solid ${C.line}`, background: C.bg, color: d < 0 ? '#fca5a5' : '#86efac',
+                    }}>{d > 0 ? `+${d}` : d}</button>
+                  ))}
+                </div>
                 <input type="range" min={0} max={100} step={1} value={v === '' ? 0 : v} onChange={e => setPct(p.ticker, e.target.value)} style={{ width: '100%', marginTop: 10, accentColor: col }} />
+                {noteOpen[p.ticker] ? (
+                  <textarea value={notes[p.ticker] || ''} onChange={e => setNotes(n => ({ ...n, [p.ticker]: e.target.value.slice(0, 500) }))} rows={2} placeholder="Why? (optional, saved with your guess)"
+                    style={{ ...inp, marginTop: 8, fontSize: 13, resize: 'vertical', fontFamily: 'inherit' }} />
+                ) : (
+                  <button onClick={() => setNoteOpen(o => ({ ...o, [p.ticker]: true }))} style={{ marginTop: 8, background: 'none', border: 'none', color: C.dim, fontSize: 12, padding: 0, cursor: 'pointer' }}>+ add a note</button>
+                )}
               </div>
             )
           })}

@@ -9,7 +9,9 @@ create table if not exists trade_forecasts (
   pct smallint not null check (pct between 0 and 100),
   market_bid smallint,          -- Kalshi YES bid at submit time (never shown to forecasters)
   market_ask smallint,          -- Kalshi YES ask at submit time
+  note text,                    -- optional free text from the forecaster
   submitted_at timestamptz not null default now()
 );
 create index if not exists trade_forecasts_lookup
   on trade_forecasts (event_ticker, forecaster, market_ticker, submitted_at desc);
+alter table trade_forecasts add column if not exists note text;

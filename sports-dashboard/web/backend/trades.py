@@ -10,7 +10,7 @@ moment so the guesses can be scored against the market later. The bid/ask never 
 Routes
   GET  /api/trades/players          players (name, current team/pos, ticker; no prices), deadline
   GET  /api/trades/mine?user=       the caller's latest guess per player
-  POST /api/trades/forecast         {user, passcode?, forecasts:{ticker: pct}}
+  POST /api/trades/forecast         {user, passcode?, forecasts:{ticker: pct}, notes?:{ticker: text}}
   GET  /api/trades/summary          per-player mean/median/n + market (trade token)
   GET  /api/trades/export           every stored row as CSV (trade token)
 
@@ -187,6 +187,7 @@ create table if not exists trade_forecasts (
   pct integer not null check (pct between 0 and 100),
   market_bid integer,
   market_ask integer,
+  note text,
   submitted_at text not null default (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 create index if not exists trade_forecasts_lookup
@@ -222,6 +223,10 @@ class _Store:
                     c.execute(SCHEMA_PG)
                 else:
                     c.executescript(SCHEMA_SQLITE)
+                    cols = {r[1] for r in c.execute("pragma table_info(trade_forecasts)").fetchall()}
+                    if "note" not in cols:          # table created before notes existed
+                        c.execute("alter table trade_forecasts add column note text")
+                        c.commit()
             finally:
                 c.close()
         self._ready = True
@@ -231,11 +236,11 @@ class _Store:
 
     def insert(self, rows: List[Dict[str, Any]]) -> None:
         self.init()
-        sql = self._q("insert into trade_forecasts (event_ticker, market_ticker, player, forecaster, pct, market_bid, market_ask) values (?,?,?,?,?,?,?)")
+        sql = self._q("insert into trade_forecasts (event_ticker, market_ticker, player, forecaster, pct, market_bid, market_ask, note) values (?,?,?,?,?,?,?,?)")
         with _db_lock:
             c = self._conn()
             try:
-                c.executemany(sql, [(r["event_ticker"], r["market_ticker"], r["player"], r["forecaster"], r["pct"], r["market_bid"], r["market_ask"]) for r in rows])
+                c.executemany(sql, [(r["event_ticker"], r["market_ticker"], r["player"], r["forecaster"], r["pct"], r["market_bid"], r["market_ask"], r.get("note")) for r in rows])
                 if not self.pg:
                     c.commit()
             finally:
@@ -313,7 +318,7 @@ def mine(user: str = ""):
     ev = _load_markets()["event"]["event_ticker"]
     try:
         rows = _store.select(
-            "select market_ticker, pct, submitted_at from trade_forecasts where event_ticker = ? and forecaster = ? order by submitted_at desc limit 2000",
+            "select market_ticker, pct, note, submitted_at from trade_forecasts where event_ticker = ? and forecaster = ? order by submitted_at desc limit 2000",
             (ev, user))
     except Exception as e:  # noqa: BLE001
         raise _db_error(e)
@@ -321,6 +326,7 @@ def mine(user: str = ""):
     return {
         "user": user,
         "forecasts": {k: v["pct"] for k, v in latest.items()},
+        "notes": {k: v["note"] for k, v in latest.items() if v.get("note")},
         "last_submitted": max((v["submitted_at"] for v in latest.values()), default=None),
     }
 
@@ -329,6 +335,7 @@ class ForecastIn(BaseModel):
     user: str
     passcode: str = ""
     forecasts: Dict[str, int]      # market ticker -> 0..100
+    notes: Dict[str, str] = {}     # market ticker -> free text (optional, kept with the row)
 
 
 @router.post("/forecast")
@@ -347,10 +354,11 @@ def forecast(body: ForecastIn):
             continue   # settled or unknown market: ignore silently
         if not isinstance(pct, int) or not 0 <= pct <= 100:
             raise HTTPException(400, f"{m['player']}: chance must be a whole number 0-100.")
+        note = (body.notes.get(ticker) or "").strip()[:500] or None
         rows.append({
             "event_ticker": ev, "market_ticker": ticker, "player": m["player"],
             "forecaster": user, "pct": pct,
-            "market_bid": m["bid"], "market_ask": m["ask"],
+            "market_bid": m["bid"], "market_ask": m["ask"], "note": note,
         })
     if not rows:
         raise HTTPException(400, "Nothing to save — set a chance on at least one player.")
@@ -374,16 +382,17 @@ def summary(request: Request):
     ev = c["event"]["event_ticker"]
     try:
         rows = _store.select(
-            "select market_ticker, forecaster, pct, submitted_at from trade_forecasts where event_ticker = ? order by submitted_at desc limit 20000",
+            "select market_ticker, forecaster, pct, note, submitted_at from trade_forecasts where event_ticker = ? order by submitted_at desc limit 20000",
             (ev,))
     except Exception as e:  # noqa: BLE001
         raise _db_error(e)
-    latest: Dict[str, Dict[str, int]] = {}
+    latest: Dict[str, Dict[str, Dict[str, Any]]] = {}
     for row in rows:
-        latest.setdefault(row["market_ticker"], {}).setdefault(row["forecaster"], row["pct"])
+        latest.setdefault(row["market_ticker"], {}).setdefault(row["forecaster"], {"pct": row["pct"], "note": row.get("note")})
     out = []
     for m in c["markets"]:
-        guesses = list(latest.get(m["ticker"], {}).values())
+        people = latest.get(m["ticker"], {})
+        guesses = [g["pct"] for g in people.values()]
         mid = (m["bid"] + m["ask"]) / 2 if m["bid"] is not None and m["ask"] is not None else None
         out.append({
             "ticker": m["ticker"], "player": m["player"], "status": m["status"], "result": m["result"],
@@ -391,6 +400,7 @@ def summary(request: Request):
             "mean": round(statistics.fmean(guesses), 1) if guesses else None,
             "median": statistics.median(guesses) if guesses else None,
             "market_bid": m["bid"], "market_ask": m["ask"], "market_mid": mid,
+            "notes": [{"forecaster": f, "pct": g["pct"], "note": g["note"]} for f, g in people.items() if g.get("note")],
             "crowd_minus_market": round(statistics.fmean(guesses) - mid, 1) if guesses and mid is not None else None,
         })
     forecasters = sorted({f for d in latest.values() for f in d})
@@ -405,7 +415,7 @@ def export_csv(request: Request):
     from fastapi.responses import PlainTextResponse
     import csv, io
     ev = _load_markets()["event"]["event_ticker"]
-    cols = ("id", "event_ticker", "market_ticker", "player", "forecaster", "pct", "market_bid", "market_ask", "submitted_at")
+    cols = ("id", "event_ticker", "market_ticker", "player", "forecaster", "pct", "market_bid", "market_ask", "note", "submitted_at")
     try:
         rows = _store.select(f"select {', '.join(cols)} from trade_forecasts where event_ticker = ? order by id", (ev,))
     except Exception as e:  # noqa: BLE001
