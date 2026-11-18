@@ -133,6 +133,7 @@ class State:
         self.fills: List[Dict[str, Any]] = []              # session fills from our orders
         self.fill_ids: Dict[str, None] = {}
         self.filled: Dict[str, float] = {}                 # order_id -> contracts filled
+        self.dead: Dict[str, float] = {}                   # order_id -> when we cancelled it
         self.armed_until = 0.0
         self.arm_mid: Dict[str, float] = {}
         self.locked = ""                                   # non-empty = refuses to arm until reset
@@ -220,8 +221,12 @@ async def sync_account() -> None:
         seen = {}
         for raw in d.get("orders", []):
             o = order_view(raw)
-            if o["coid"].startswith(PREFIX):               # never touch orders we did not place
+            # Never touch orders we did not place. And the list keeps showing an order
+            # for a second or two after it is cancelled: those are not resting.
+            if o["coid"].startswith(PREFIX) and o["id"] not in S.dead:
                 seen[o["id"]] = o
+        for oid in [i for i, t in S.dead.items() if now - t > 60]:
+            S.dead.pop(oid, None)
         for oid, o in seen.items():
             if oid in S.orders:
                 S.orders[oid]["left"] = o["left"]
@@ -297,11 +302,13 @@ async def cancel(oid: str) -> bool:
         try:
             await S.k.req("DELETE", f"/portfolio/events/orders/{oid}")
             S.orders.pop(oid, None)
+            S.dead[oid] = time.time()
             return True
         except Exception as ex:  # noqa: BLE001
             msg = str(ex)
             if msg.startswith("404") or "not_found" in msg or "not found" in msg.lower():
                 S.orders.pop(oid, None)                     # already filled, expired or gone
+                S.dead[oid] = time.time()
                 return True
             print(f"[flow] cancel failed {oid} try {attempt}: {msg[:200]}", flush=True)
             await asyncio.sleep(0.15 * (attempt + 1))
@@ -583,13 +590,14 @@ async def flow_test(req: Req):
             t1 = time.time()
             await st.k.req("DELETE", f"/portfolio/events/orders/{oid}")
             steps.append(f"cancelled in {round((time.time() - t1) * 1000)} ms")
-            await asyncio.sleep(0.5)
-            o = (await st.k.req("GET", "/portfolio/orders", params={"status": "canceled", "limit": 50,
-                                                                   "event_ticker": st.event_of(tk)})).get("orders", [])
-            r = await st.k.req("GET", "/portfolio/orders", params={"status": "resting", "limit": 200,
-                                                                  "event_ticker": st.event_of(tk)})
-            gone = any(x["order_id"] == oid for x in o) or not any(x["order_id"] == oid for x in r.get("orders", []))
-            steps.append("confirmed cancelled" if gone else "STILL RESTING — cancel it on Kalshi")
+            st.dead[oid] = time.time()
+            while not gone and time.time() - t1 < 4.0:      # the list trails here too
+                await asyncio.sleep(0.25)
+                r = await st.k.req("GET", "/portfolio/orders", params={"status": "resting", "limit": 200,
+                                                                      "event_ticker": st.event_of(tk)})
+                gone = not any(x["order_id"] == oid for x in r.get("orders", []))
+            steps.append(f"gone from the resting list after {round((time.time() - t1) * 1000)} ms" if gone
+                         else "STILL LISTED as resting after 4 s — check it on Kalshi")
         except Exception as ex:  # noqa: BLE001
             steps.append(f"FAILED: {str(ex)[:200]}")
     ok = found and gone
