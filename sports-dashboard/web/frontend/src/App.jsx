@@ -2,6 +2,7 @@ import { Component, useState, useCallback, useRef, useEffect, useMemo } from 're
 import { mlbLocks, mlbInningLegs, mlbGameLegs } from './mlbRules.js'
 import UpsetsTab from './UpsetsTab.jsx'
 import TradesTab from './TradesTab.jsx'
+import FlowPanel, { useFlow, flowNetPerPair } from './FlowPanel.jsx'
 
 export const API = window.location.hostname === 'localhost'
   ? ''  // proxied via vite dev server
@@ -3101,7 +3102,7 @@ function CFBScoreKeeper({ sc, setSc }) {
   )
 }
 
-function CFBMarketRow({ m, sel, isLine, lock, onPick }) {
+function CFBMarketRow({ m, sel, isLine, lock, onPick, flow }) {
   const btn = (side) => {
     const ask = side === 'yes' ? m.yes_ask : m.no_ask
     const active = sel?.ticker === m.ticker && sel?.side === side
@@ -3142,6 +3143,19 @@ function CFBMarketRow({ m, sel, isLine, lock, onPick }) {
           ) : null}
         </div>
       </div>
+      {flow && (() => {
+        const net = flowNetPerPair(m.yes_bid, m.yes_ask)
+        return (
+          <button onClick={() => flow.toggle(m.ticker, m.label)} title="Flow collector: rest bids on both sides of this market" style={{
+            width: 44, padding: '5px 0', borderRadius: 8, lineHeight: 1.15, cursor: 'pointer',
+            border: `1px solid ${flow.on ? '#a855f7' : '#334155'}`, background: flow.on ? '#a855f722' : '#0f172a',
+            color: flow.on ? '#c084fc' : '#64748b', fontSize: 11, fontWeight: 800,
+          }}>
+            <div style={{ fontSize: 9, fontWeight: 700, opacity: 0.8 }}>MM</div>
+            {net != null ? `${net.toFixed(1)}¢` : '—'}
+          </button>
+        )
+      })()}
       {btn('yes')}
       {btn('no')}
     </div>
@@ -3427,6 +3441,7 @@ function CFBTab() {
   const [sweepBudget, setSweepBudget] = useState(50)
   const [sweepPlan, setSweepPlan] = useState(null)
   const [sweepResult, setSweepResult] = useState(null)
+  const flow = useFlow(API, CFB_GAME, token)
 
   useEffect(() => {
     try { localStorage.setItem(CFB_SCORE_KEY, JSON.stringify(sc)) } catch {}
@@ -3639,6 +3654,8 @@ function CFBTab() {
 
       <CFBScoreKeeper sc={sc} setSc={setSc} />
 
+      <FlowPanel flow={flow} token={token} onUnlock={() => setShowPin(true)} />
+
       {snap && (
         <>
           <div style={{ display: 'flex', gap: 8, marginBottom: 4 }}>
@@ -3700,6 +3717,7 @@ function CFBTab() {
               <div style={{ padding: '0 10px 6px 4px' }}>
                 {markets.map((m, i) => (
                   <CFBMarketRow key={m.ticker} m={m} sel={sel} isLine={i === lineIdx} lock={locks[m.ticker]}
+                    flow={flow.st ? { on: flow.st.enabled.includes(m.ticker), toggle: (t, l) => flow.toggle(t, `${g.title} · ${l}`) } : null}
                     onPick={(mk, side) => pick(mk, side, g.title)} />
                 ))}
               </div>

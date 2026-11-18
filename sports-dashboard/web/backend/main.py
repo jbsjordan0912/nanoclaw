@@ -4044,3 +4044,12 @@ if feature_on("trades"):
     import trades as _trades
     _trades.configure(_verify_trade_token)
     app.include_router(_trades.router)
+
+
+# ---------------------------------------------------------------------------
+# Flow collector (passive two-sided quotes on one game, manual switch) — see flow.py
+# ---------------------------------------------------------------------------
+if feature_on("cfb"):
+    import flow as _flow
+    _flow.configure(_verify_trade_token)
+    app.include_router(_flow.router)
