@@ -156,12 +156,14 @@ class State:
         return "-".join(tk.split("-")[:2])
 
     def clean_book(self, tk: str) -> Tuple[Optional[int], Optional[int]]:
-        """Best YES bid and best NO bid with our own resting size taken out."""
+        """Best YES bid and best NO bid of everyone else (our own size taken out).
+        Kalshi's book snapshot can trail our own orders by a second or so. A level
+        smaller than our order cannot contain it, so it is left as it is."""
         out: List[Optional[int]] = []
         for side in ("yes", "no"):
             lv = dict(self.book.get(tk, {}).get(side) or {})
             for o in (() if DRY else self.orders.values()):    # dry orders are not in the real book
-                if o["ticker"] == tk and o["side"] == side and o["price"] in lv:
+                if o["ticker"] == tk and o["side"] == side and lv.get(o["price"], 0) >= o["left"]:
                     lv[o["price"]] -= o["left"]
             px = [p for p, q in lv.items() if q >= 0.5]
             out.append(max(px) if px else None)
@@ -333,12 +335,28 @@ async def switch_off(why: str) -> None:
 
 
 def targets(tk: str) -> Dict[str, Tuple[int, int]]:
-    """side -> (price, size) we want resting on this market right now."""
+    """side -> (price, size) we want resting on this market right now.
+
+    Each side joins the best bid. A resting order of ours is never moved DOWN:
+    the book snapshot trails our own orders, so "nobody else is at my price" is
+    often just a snapshot taken before we got there, and chasing it made the
+    quote hop a cent back and forth every pass. If the others really have left,
+    their mid moves and the jump guard pulls everything instead."""
     st = S.settings
-    b, nb = S.clean_book(tk)
+    raw = S.book.get(tk, {})
+    mine = {sd: max((o["price"] for o in S.orders.values() if o["ticker"] == tk and o["side"] == sd), default=None)
+            for sd in ("yes", "no")}
+    best = {}
+    for sd in ("yes", "no"):
+        px = [p for p, q in (raw.get(sd) or {}).items() if q >= 0.5]
+        cands = [x for x in (max(px) if px else None, mine[sd]) if x is not None]
+        best[sd] = max(cands) if cands else None
+    b, nb = best["yes"], best["no"]
     if b is None or nb is None:
         return {}
     a = 100 - nb
+    if a - b < 1:
+        return {}                                # crossed snapshot: wait for the next one
     pos = S.pos.get(tk, 0.0)
     ok = (a - b) >= st["min_spread"] and b >= 3 and a <= 97
     want: Dict[str, Tuple[int, int]] = {}
@@ -375,6 +393,10 @@ async def quote_pass() -> None:
                 if o is not keep:
                     jobs.append(cancel(o["id"]))
             if w and not keep:
+                if have:
+                    print(f"[flow] reprice {tk} {side} {[(o['price'], o['left']) for o in have]} -> {w} "
+                          f"book={ {sd: sorted(S.book.get(tk, {}).get(sd, {}).items())[-3:] for sd in ('yes', 'no')} }",
+                          flush=True)
                 jobs.append(place(tk, side, w[0], w[1]))
     for o in [o for o in S.orders.values() if o["ticker"] not in S.enabled]:
         jobs.append(cancel(o["id"]))
