@@ -132,6 +132,7 @@ class State:
         self.pos: Dict[str, float] = {}                    # net YES contracts per ticker (account-wide)
         self.fills: List[Dict[str, Any]] = []              # session fills from our orders
         self.fill_ids: Dict[str, None] = {}
+        self.filled: Dict[str, float] = {}                 # order_id -> contracts filled
         self.armed_until = 0.0
         self.arm_mid: Dict[str, float] = {}
         self.locked = ""                                   # non-empty = refuses to arm until reset
@@ -226,8 +227,13 @@ async def sync_account() -> None:
                 S.orders[oid]["left"] = o["left"]
             else:                                           # ours, but not tracked (restart, late ack)
                 S.orders[oid] = {**o, "ts": now, "exp": 0}
-        for oid in [i for i, o in S.orders.items() if i not in seen and now - o["ts"] > 2.5]:
-            S.orders.pop(oid, None)                         # filled, expired or cancelled
+        # The list trails the matching engine. An order missing from it is dropped only
+        # once its fills account for it, it has expired, or it has been missing 4s;
+        # dropping early would make the next pass place a second copy.
+        for oid in [i for i, o in S.orders.items() if i not in seen and (
+                now - o["ts"] > 4.0 or S.filled.get(i, 0.0) >= o.get("size", 1e9) - 0.01
+                or (o.get("exp") and now > o["exp"] + 1))]:
+            S.orders.pop(oid, None)
         for ev in events:
             d = await S.k.req("GET", "/portfolio/positions", params={"event_ticker": ev, "limit": 200})
             got = {p["ticker"]: float(p.get("position_fp") or 0) for p in d.get("market_positions", [])}
@@ -247,6 +253,7 @@ async def sync_account() -> None:
                    "side": side, "price": round(float(px) * 100), "qty": float(f.get("count_fp") or 0),
                    "fee": float(f.get("fee_cost") or 0), "taker": bool(f.get("is_taker"))}
             S.fills.append(row)
+            S.filled[f["order_id"]] = S.filled.get(f["order_id"], 0.0) + row["qty"]
             S.note(f"FILL bought {row['qty']:g} {row['label']} {side.upper()} at {row['price']}¢")
     S.sync_ts = time.time()
 
@@ -279,7 +286,7 @@ async def place(tk: str, side: str, price: int, size: int) -> None:
     left = float(d.get("remaining_count") or 0)
     if left > 0:
         S.orders[oid] = {"id": oid, "ticker": tk, "side": side, "price": price, "left": left,
-                         "coid": coid, "ts": time.time(), "exp": exp}
+                         "size": float(size), "coid": coid, "ts": time.time(), "exp": exp}
 
 
 async def cancel(oid: str) -> bool:
@@ -563,15 +570,26 @@ async def flow_test(req: Req):
             oid = d["order_id"]
             st.my_ids[oid] = None
             steps.append(f"placed 1 YES at 1¢ in {round((time.time() - t0) * 1000)} ms")
-            r = await st.k.req("GET", "/portfolio/orders", params={"status": "resting", "ticker": tk, "limit": 100})
-            found = any(o["order_id"] == oid for o in r.get("orders", []))
-            steps.append("seen resting on Kalshi" if found else "NOT seen in resting orders")
+            # Kalshi's order list trails the matching engine, so look for up to 3s
+            # and report how long it took: that lag is what sync_account must allow for.
+            while not found and time.time() - t0 < 3.0:
+                r = await st.k.req("GET", "/portfolio/orders", params={"status": "resting", "limit": 200,
+                                                                      "event_ticker": st.event_of(tk)})
+                found = any(o["order_id"] == oid for o in r.get("orders", []))
+                if not found:
+                    await asyncio.sleep(0.15)
+            steps.append(f"listed as resting after {round((time.time() - t0) * 1000)} ms" if found
+                         else "NOT listed as resting within 3 s")
             t1 = time.time()
             await st.k.req("DELETE", f"/portfolio/events/orders/{oid}")
             steps.append(f"cancelled in {round((time.time() - t1) * 1000)} ms")
-            r = await st.k.req("GET", "/portfolio/orders", params={"status": "resting", "ticker": tk, "limit": 100})
-            gone = not any(o["order_id"] == oid for o in r.get("orders", []))
-            steps.append("confirmed gone" if gone else "STILL RESTING — cancel it on Kalshi")
+            await asyncio.sleep(0.5)
+            o = (await st.k.req("GET", "/portfolio/orders", params={"status": "canceled", "limit": 50,
+                                                                   "event_ticker": st.event_of(tk)})).get("orders", [])
+            r = await st.k.req("GET", "/portfolio/orders", params={"status": "resting", "limit": 200,
+                                                                  "event_ticker": st.event_of(tk)})
+            gone = any(x["order_id"] == oid for x in o) or not any(x["order_id"] == oid for x in r.get("orders", []))
+            steps.append("confirmed cancelled" if gone else "STILL RESTING — cancel it on Kalshi")
         except Exception as ex:  # noqa: BLE001
             steps.append(f"FAILED: {str(ex)[:200]}")
     ok = found and gone
